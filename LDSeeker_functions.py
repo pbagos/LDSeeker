@@ -1,7 +1,7 @@
 import dask.dataframe as dd
 import numpy as np
 import pandas as pd
-
+import polars as pl
 pd.set_option('display.width', None)
 
 
@@ -166,51 +166,135 @@ def pheno_Scanner_process(study_df, r2threshold, population, maf_input, chromoso
 
 
 def TOP_LD_info(rs_list, chrom, population, maf_threshold, R2_threshold, imp_snp_list):
-    print("Loading TOP-LD files from Parquet...")
+    # print("Loading TOP-LD files from Parquet...")
+    #
+    # # Updated paths to Parquet format
+    # maf_file = f'{population}_chr{chrom}_no_filter_0.2_1000000_info_annotation.parquet'
+    # ld_file = f'{population}_chr{chrom}_no_filter_0.2_1000000_LD.parquet'
+    #
+    # # Load MAF DataFrame from Parquet
+    # maf_df = dd.read_parquet(maf_file, columns=['Position', 'rsID', 'MAF', 'REF', 'ALT'])
+    # maf_df = maf_df[maf_df['MAF'] >= maf_threshold]
+    #
+    # # Load LD DataFrame from Parquet
+    # ld_df = dd.read_parquet(ld_file, columns=['SNP1', 'SNP2', 'R2', '+/-corr', 'Dprime'])
+    # ld_df = ld_df[ld_df['R2'] >= R2_threshold]
+    #
+    # # Rename columns for consistency
+    # maf_df = maf_df.rename(columns={'Position': 'SNP'})
+    #
+    # # Merge LD with MAF data
+    # merged_df = dd.merge(ld_df, maf_df.rename(
+    #     columns={'SNP': 'SNP1', 'rsID': 'rsID1', 'MAF': 'MAF1', 'REF': 'REF1', 'ALT': 'ALT1'}), on='SNP1')
+    # merged_df = dd.merge(merged_df, maf_df.rename(
+    #     columns={'SNP': 'SNP2', 'rsID': 'rsID2', 'MAF': 'MAF2', 'REF': 'REF2', 'ALT': 'ALT2'}), on='SNP2')
+    #
+    # # Final selected and renamed columns
+    # final_df = merged_df[
+    #     ['SNP1', 'SNP2', 'R2', '+/-corr', 'Dprime', 'rsID1', 'rsID2', 'MAF1', 'MAF2', 'REF1', 'ALT1', 'REF2', 'ALT2']]
+    # final_df = final_df.rename(columns={'SNP1': 'pos1', 'SNP2': 'pos2'})
+    #
+    # # Filter based on SNP list
+    # if imp_snp_list:
+    #     result = final_df[final_df['rsID1'].isin(rs_list) & final_df['rsID2'].isin(imp_snp_list)].compute()
+    # else:
+    #     result = final_df[final_df['rsID1'].isin(rs_list)].compute()
+    #
+    # if result.empty:
+    #     print("No SNPs found")
+    #     exit()
+    #
+    # result.reset_index(inplace=True, drop=True)
+    # result.rename(columns={"MAF1": "ALT_AF1", "MAF2": "ALT_AF2"}).to_csv(
+    #     f'LD_info_TOP_LD_chr{chrom}.txt', sep="\t", index=False
+    # )
+    #
+    # return result
+    # Filepaths
+    maf_file = f"{population}_chr{chrom}_no_filter_0.2_1000000_info_annotation.parquet"
+    ld_file = f"{population}_chr{chrom}_no_filter_0.2_1000000_LD.parquet"
 
-    # Updated paths to Parquet format
-    maf_file = f'{population}_chr{chrom}_no_filter_0.2_1000000_info_annotation.parquet'
-    ld_file = f'{population}_chr{chrom}_no_filter_0.2_1000000_LD.parquet'
-
-    # Load MAF DataFrame from Parquet
-    maf_df = dd.read_parquet(maf_file, columns=['Position', 'rsID', 'MAF', 'REF', 'ALT'])
-    maf_df = maf_df[maf_df['MAF'] >= maf_threshold]
-
-    # Load LD DataFrame from Parquet
-    ld_df = dd.read_parquet(ld_file, columns=['SNP1', 'SNP2', 'R2', '+/-corr', 'Dprime'])
-    ld_df = ld_df[ld_df['R2'] >= R2_threshold]
-
-    # Rename columns for consistency
-    maf_df = maf_df.rename(columns={'Position': 'SNP'})
-
-    # Merge LD with MAF data
-    merged_df = dd.merge(ld_df, maf_df.rename(
-        columns={'SNP': 'SNP1', 'rsID': 'rsID1', 'MAF': 'MAF1', 'REF': 'REF1', 'ALT': 'ALT1'}), on='SNP1')
-    merged_df = dd.merge(merged_df, maf_df.rename(
-        columns={'SNP': 'SNP2', 'rsID': 'rsID2', 'MAF': 'MAF2', 'REF': 'REF2', 'ALT': 'ALT2'}), on='SNP2')
-
-    # Final selected and renamed columns
-    final_df = merged_df[
-        ['SNP1', 'SNP2', 'R2', '+/-corr', 'Dprime', 'rsID1', 'rsID2', 'MAF1', 'MAF2', 'REF1', 'ALT1', 'REF2', 'ALT2']]
-    final_df = final_df.rename(columns={'SNP1': 'pos1', 'SNP2': 'pos2'})
-
-    # Filter based on SNP list
-    if imp_snp_list:
-        result = final_df[final_df['rsID1'].isin(rs_list) & final_df['rsID2'].isin(imp_snp_list)].compute()
-    else:
-        result = final_df[final_df['rsID1'].isin(rs_list)].compute()
-
-    if result.empty:
-        print("No SNPs found")
-        exit()
-
-    result.reset_index(inplace=True, drop=True)
-    result.rename(columns={"MAF1": "ALT_AF1", "MAF2": "ALT_AF2"}).to_csv(
-        f'LD_info_TOP_LD_chr{chrom}.txt', sep="\t", index=False
+    # 1) Lazy load and filter MAF table
+    maf_lazy = (
+        pl.scan_parquet(maf_file)
+        .select([
+            pl.col("Position").alias("SNP"),
+            pl.col("rsID"),
+            pl.col("MAF"),
+            pl.col("REF"),
+            pl.col("ALT"),
+        ])
+        .filter(pl.col("MAF") >= maf_threshold)
     )
 
-    return result
+    # 2) Lazy load and filter LD table
+    ld_lazy = (
+        pl.scan_parquet(ld_file)
+        .select([
+            pl.col("SNP1"),
+            pl.col("SNP2"),
+            pl.col("R2"),
+            pl.col("+/-corr"),
+            pl.col("Dprime"),
+        ])
+        .filter(pl.col("R2") >= R2_threshold)
+    )
 
+    # 3) Join LD to MAF on SNP1
+    df = ld_lazy.join(
+        maf_lazy.rename({
+            "SNP": "SNP1",
+            "rsID": "rsID1",
+            "MAF": "MAF1",
+            "REF": "REF1",
+            "ALT": "ALT1",
+        }),
+        on="SNP1",
+    )
+
+    # 4) Join the result to MAF on SNP2
+    df = df.join(
+        maf_lazy.rename({
+            "SNP": "SNP2",
+            "rsID": "rsID2",
+            "MAF": "MAF2",
+            "REF": "REF2",
+            "ALT": "ALT2",
+        }),
+        on="SNP2",
+    )
+
+    # 5) Filter by your SNP lists
+    if imp_snp_list:
+        df = df.filter(
+            (pl.col("rsID1").is_in(rs_list)) &
+            (pl.col("rsID2").is_in(imp_snp_list))
+        )
+    else:
+        df = df.filter(pl.col("rsID1").is_in(rs_list))
+
+    # 6) Collect into memory
+    result = df.collect()
+
+    # 7) Check for emptiness
+    if result.height == 0:
+        print("No SNPs found matching your criteria.", file=sys.stderr)
+        sys.exit(1)
+
+    # 8) Rename for output
+    result = result.rename({
+        "SNP1": "pos1",
+        "SNP2": "pos2",
+        "MAF1": "ALT_AF1",
+        "MAF2": "ALT_AF2",
+    })
+    print(result)
+    # 9) Write to TSV
+    out_fname = f"LD_info_TOP_LD_chr{chrom}.txt"
+    result.write_csv(out_fname, separator="\t")
+    print(f"Wrote LD info to {out_fname}")
+
+    return result
 
 def TOP_LD_process(study_df, r2threshold, population, maf_input, chromosome, imp_snp_list):
     # Fetch LD info data
