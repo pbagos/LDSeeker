@@ -14,7 +14,7 @@ def main():
     imp_snp_list = []
     version = '1.0.0'
     print("---------------------------------------------------------------------------------")
-    print("LDSeeker : Search LD among the variants of a GWAS")
+    print("LDSeeker : Search LD among a set of variants")
     print("Version " + version + "; August 2025")
     print("Copyright (C) 2025 Pantelis Bagos")
     print("Freely distributed under the GNU General Public Licence (GPLv3)")
@@ -26,7 +26,9 @@ def main():
     parser.add_argument('--pop', type=str, required=True, help='Population')
 
     parser.add_argument('--maf', type=float, required=True, help='MAF input value')
-    parser.add_argument('--ref', type=str, required=False, help='LD Reference files (Pheno_Scanner, TOP_LD, Hap_Map or all_panels)',default='all_panels')
+    parser.add_argument('--ref', type=str, required=False, help='LD Reference files (Pheno_Scanner, 1000G_hg38, TOP_LD, Hap_Map or all_panels)',default='all_panels')
+    parser.add_argument('--pairwise', type=str, required=False, help='LD found pairwise (YES, NO)',default='NO')
+
     parser.add_argument('--imp_list', type=str, required=False,
                         help='A filename to define SNPs to impute (each SNP has a new line, no header)')
 
@@ -39,6 +41,7 @@ def main():
     maf_input = args.maf
     ref_file = args.ref
     imp_snp_list_path = args.imp_list
+    pairwise = args.pairwise
 
     if imp_snp_list_path != None:
         imp_snp_list = list(pd.read_csv(imp_snp_list_path, header=None)[0])
@@ -48,7 +51,12 @@ def main():
         print(f"Error: File {file_path} not found.")
         return
 
-    LDSeeker_functions.process_data(file_path, r2threshold, population, maf_input, ref_file,imp_snp_list)
+    if pairwise == 'NO':
+        # Standard  case
+        LDSeeker_functions.process_data(file_path, r2threshold, population, maf_input, ref_file,imp_snp_list)
+    else:
+        # Find pairwise LD among the given variants
+        LDSeeker_functions.process_data_pairwise(file_path, r2threshold, population, maf_input, ref_file,imp_snp_list)
 
 
 if __name__ == "__main__":
