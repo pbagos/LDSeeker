@@ -1,5 +1,5 @@
 # LDSeeker
-A tool to find LD of GWAS SNPs
+A tool to find LD of rsIDs in Genome Wide Association Studies
 
 
 ```
