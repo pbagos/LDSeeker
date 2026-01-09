@@ -1,24 +1,130 @@
-import dask.dataframe as dd
-import numpy as np
+#!/usr/bin/env python
+
 import pandas as pd
 import gc
 import polars as pl
+from collections import defaultdict
 
 pd.set_option('display.width', None)
 
+# -------------------------------------------------------------------
+# LD pruning helper
+# -------------------------------------------------------------------
+
+def ld_prune_pairs(
+    study_df: pd.DataFrame,
+    ld_pairs,
+    snp_col: str = "SNP",
+    p_col: str | None = "P",
+    snp1_col: str = "SNP1",
+    snp2_col: str = "SNP2",
+):
+    """
+    LD pruning on a GWAS table given pairwise LD information.
+
+    Parameters
+    ----------
+    study_df : pandas.DataFrame
+        Original GWAS / summary statistics. Must contain `snp_col` and
+        optionally `p_col`.
+
+    ld_pairs : polars.DataFrame or pandas.DataFrame
+        Pairwise LD table (already filtered at desired R²). Must contain
+        `snp1_col` and `snp2_col`.
+
+    snp_col : str
+        Name of SNP ID column in `study_df` (e.g. "SNP" or "rsID").
+
+    p_col : str or None
+        Column used to rank SNPs (e.g. "P"). Lower values are considered
+        more important. If None or missing, the input order of `study_df`
+        is used.
+
+    snp1_col, snp2_col : str
+        Column names of the two SNP IDs in `ld_pairs`.
+
+    Returns
+    -------
+    kept_df : pandas.DataFrame
+        View of `study_df` restricted to SNPs that REMAIN after LD pruning
+        (the LD-independent set).
+
+    pruned_df : pandas.DataFrame
+        View of `study_df` restricted to SNPs that were REMOVED by
+        LD pruning (in LD with some more important SNP).
+    """
+
+    # 1) Build ranking: smallest p first if p_col exists, else original order
+    if (p_col is not None) and (p_col in study_df.columns):
+        ranking = (
+            study_df[[snp_col, p_col]]
+            .dropna(subset=[p_col])
+            .drop_duplicates(subset=[snp_col])
+            .sort_values(p_col, ascending=True)
+        )
+        ordered_snps = ranking[snp_col].tolist()
+    else:
+        ranking = study_df[[snp_col]].drop_duplicates(subset=[snp_col])
+        ordered_snps = ranking[snp_col].tolist()
+
+    # 2) Build adjacency list (LD graph) from pairwise LD table
+    neighbors: dict[str, set[str]] = defaultdict(set)
+
+    if isinstance(ld_pairs, pl.DataFrame):
+        s1 = ld_pairs.select(snp1_col).to_series().to_list()
+        s2 = ld_pairs.select(snp2_col).to_series().to_list()
+    else:
+        # assume pandas-like
+        s1 = ld_pairs[snp1_col].tolist()
+        s2 = ld_pairs[snp2_col].tolist()
+
+    for a, b in zip(s1, s2):
+        if pd.isna(a) or pd.isna(b):
+            continue
+        neighbors[a].add(b)
+        neighbors[b].add(a)
+
+    kept_snps: set[str] = set()
+    excluded: set[str] = set()   # SNPs that cannot be kept anymore
+
+    # 3) Greedy pruning: walk SNPs in ranked order;
+    #    keep if not excluded, then exclude its neighbors.
+    for snp in ordered_snps:
+        if snp in excluded or snp in kept_snps:
+            continue
+        kept_snps.add(snp)
+        for nb in neighbors.get(snp, ()):
+            excluded.add(nb)
+
+    # 4) SNPs with no LD edges (not in neighbors) → keep them
+    for snp in study_df[snp_col].drop_duplicates():
+        if (snp not in kept_snps) and (snp not in excluded):
+            kept_snps.add(snp)
+
+    all_snps = set(study_df[snp_col].unique())
+    pruned_snps = all_snps - kept_snps
+
+    # 5) Split the original GWAS into "kept" and "pruned-out"
+    kept_df = study_df[study_df[snp_col].isin(kept_snps)].copy()
+    pruned_df = study_df[study_df[snp_col].isin(pruned_snps)].copy()
+
+    return kept_df, pruned_df
 
 
+# -------------------------------------------------------------------
+# TOP-LD (pairwise)
+# -------------------------------------------------------------------
 
 def TOP_LD_info_pairwise(rs_list, chrom, population, maf_threshold, R2_threshold, imp_snp_list=None):
     print("Loading TOP-LD files...")
 
-    # 1) Combine rsIDs up‐front
+    # 1) Combine rsIDs up-front
     if imp_snp_list:
         all_rsids = list(set(rs_list) | set(imp_snp_list))
     else:
         all_rsids = rs_list
 
-    # 2) Lazy‐scan the MAF file, project only needed cols, then filter
+    # 2) Lazy-scan the MAF file, project only needed cols, then filter
     maf_path = (
         f"D:/ref_parquet/ref/TOP_LD/{population}/SNV/"
         f"{population}_chr{chrom}_no_filter_0.2_1000000_info_annotation.parquet"
@@ -30,7 +136,7 @@ def TOP_LD_info_pairwise(rs_list, chrom, population, maf_threshold, R2_threshold
         .filter(pl.col("rsID").is_in(all_rsids))
     )
 
-    # 3) Lazy‐scan the LD file, project and filter by R²
+    # 3) Lazy-scan the LD file, project and filter by R²
     ld_path = (
         f"D:/ref_parquet/ref/TOP_LD/{population}/SNV/"
         f"{population}_chr{chrom}_no_filter_0.2_1000000_LD.parquet"
@@ -75,21 +181,19 @@ def TOP_LD_info_pairwise(rs_list, chrom, population, maf_threshold, R2_threshold
         "REF1", "ALT1", "REF2", "ALT2"
     ])
 
-    # 8) Execute once in streaming mode (__very__ memory‐efficient)
-
+    # 8) Execute once in streaming mode (very memory-efficient)
     result = final_lazy.collect()
 
     if result.is_empty():
         print("No SNPs found.")
 
-    # 10) FINAL FILTER: ensure both SNP_A and SNP_B are in the original snp_set
+    # 9) FINAL FILTER: ensure both SNP_A and SNP_B are in the original snp_set
     result = result.filter(
         pl.col("rsID1").is_in(rs_list) &
         pl.col("rsID2").is_in(rs_list)
     )
 
-
-    # 9) Cleanup
+    # 10) Cleanup
     del maf_lazy, maf1, maf2, ld_lazy, joined, final_lazy
     gc.collect()
 
@@ -98,17 +202,23 @@ def TOP_LD_info_pairwise(rs_list, chrom, population, maf_threshold, R2_threshold
 
 def TOP_LD_process_pairwise(study_df, r2threshold, population, maf_input, chromosome, imp_snp_list):
     # Fetch LD info data
-
-    outputData = TOP_LD_info_pairwise(list(study_df['SNP']), chromosome, population, maf_input, r2threshold, imp_snp_list)
-
+    outputData = TOP_LD_info_pairwise(
+        list(study_df['SNP']),
+        chromosome,
+        population,
+        maf_input,
+        r2threshold,
+        imp_snp_list
+    )
     return outputData
 
 
-
+# -------------------------------------------------------------------
+# HapMap (pairwise)
+# -------------------------------------------------------------------
 
 def Hap_Map_LD_info_dask_pairwise(rs_list, chrom, population, maf_threshold, R2_threshold, imp_snp_list):
     print(f"Loading Hap Map files ({population}) ...")
-
 
     # 1) Validate population
     valid_pops = ['YRI', 'CHB', 'JPT', 'CEU', 'MKK', 'LWK',
@@ -123,33 +233,26 @@ def Hap_Map_LD_info_dask_pairwise(rs_list, chrom, population, maf_threshold, R2_
     # 3) Read and preprocess MAF table
     maf_df = (
         pl.read_parquet(maf_file)
-        # compute MAF as 'otherallele_freq'
         .with_columns(pl.col("otherallele_freq").alias("MAF"))
-        # keep only the needed columns
         .select(["rs#", "refallele", "otherallele", "MAF"])
-        # rename to match downstream joins
         .rename({
             "rs#": "rsID",
             "refallele": "REF",
             "otherallele": "ALT"
         })
-        # filter on MAF threshold
         .filter(pl.col("MAF") >= float(maf_threshold))
     )
 
     # 4) Read and preprocess LD table
-    #    Parquet likely comes with integer column names (0,1,2,…). We filter & rename by position.
     ld_raw = pl.read_parquet(ld_file)
-    cols = ld_raw.columns  # e.g. ['0','1','2',…] or positional ints
+    cols = ld_raw.columns
 
     ld_df = (
         ld_raw
-        # keep only pairs where alleles differ and R2 >= threshold
         .filter(
             (pl.col(cols[3]) != pl.col(cols[4])) &
             (pl.col(cols[6]) >= float(R2_threshold))
         )
-        # rename the first 7 columns to names
         .rename({
             cols[0]: "pos1",
             cols[1]: "pos2",
@@ -159,14 +262,11 @@ def Hap_Map_LD_info_dask_pairwise(rs_list, chrom, population, maf_threshold, R2_
             cols[5]: "Dprime",
             cols[6]: "R2"
         })
-        # drop any extra columns beyond the 7 we care about
         .select(["pos1", "pos2", "pop", "rsID1", "rsID2", "Dprime", "R2"])
     )
 
     # 5) Join LD ↔ MAF on rsID1 and rsID2
-    #    First join on rsID1 (adds REF, ALT, MAF from maf_df)
     tmp = ld_df.join(maf_df, left_on="rsID1", right_on="rsID", how="inner")
-    #    Then join that result on rsID2 (suffix="_2" for the second maf columns)
     merged = tmp.join(
         maf_df,
         left_on="rsID2",
@@ -191,7 +291,7 @@ def Hap_Map_LD_info_dask_pairwise(rs_list, chrom, population, maf_threshold, R2_
         pl.col("Dprime")
     ])
 
-    # 7) Apply the user’s SNP‐list filter
+    # 7) Apply the user’s SNP-list filter
     if imp_snp_list:
         result = result.filter(
             pl.col("rsID1").is_in(rs_list) &
@@ -200,14 +300,7 @@ def Hap_Map_LD_info_dask_pairwise(rs_list, chrom, population, maf_threshold, R2_
     else:
         result = result.filter(pl.col("rsID1").is_in(rs_list))
 
-    # # 8) Rename MAF columns to ALT_AF and convert to Pandas
-    # final_pl = result.rename({
-    # "MAF1": "ALT_AF1",
-    # "MAF2": "ALT_AF2"
-    # })
-
-    # Convert to Pandas and reset index
-    # 10) FINAL FILTER: ensure both SNP_A and SNP_B are in the original snp_set
+    # 8) FINAL FILTER: ensure both SNP_A and SNP_B are in the original snp_set
     result = result.filter(
         pl.col("rsID1").is_in(rs_list) &
         pl.col("rsID2").is_in(rs_list)
@@ -217,24 +310,24 @@ def Hap_Map_LD_info_dask_pairwise(rs_list, chrom, population, maf_threshold, R2_
     del ld_raw, ld_df, maf_df, tmp, merged
     gc.collect()
 
-    # if result.empty:
-    #     print("No SNPs found")
-
-
-
-
     return result
 
 
 def Hap_Map_process_pairwise(study_df, r2threshold, population, maf_input, chromosome, imp_snp_list):
-    # Fetch LD info data
-    outputData = Hap_Map_LD_info_dask_pairwise(list(study_df['SNP']), chromosome, population, maf_input, r2threshold,
-                                      imp_snp_list)
-
-
-
+    outputData = Hap_Map_LD_info_dask_pairwise(
+        list(study_df['SNP']),
+        chromosome,
+        population,
+        maf_input,
+        r2threshold,
+        imp_snp_list
+    )
     return outputData
 
+
+# -------------------------------------------------------------------
+# PhenoScanner (pairwise)
+# -------------------------------------------------------------------
 
 def pheno_Scanner_LD_info_dask_pairwise(rs_list, chrom, population, maf_threshold, R2_threshold, imp_snp_list):
     # 1) Enforce minimum R2 threshold
@@ -317,7 +410,7 @@ def pheno_Scanner_LD_info_dask_pairwise(rs_list, chrom, population, maf_threshol
         "r2": "R2",
     })
 
-    # 8) Filter by user‐supplied SNP lists
+    # 8) Filter by user-supplied SNP lists
     filtered = renamed.filter(
         pl.col("rsID2").is_in(rs_list) &
         (pl.col("rsID1").is_in(imp_snp_list) if imp_snp_list else pl.lit(True))
@@ -336,9 +429,8 @@ def pheno_Scanner_LD_info_dask_pairwise(rs_list, chrom, population, maf_threshol
         "MAF1", "MAF2", "ALT1", "REF1", "ALT2", "REF2",
     ])
 
-    # 11) Execute in streaming, collect to Polars → pandas
+    # 11) Execute in streaming, collect to Polars
     final_pl = final_lazy.collect()
-
 
     final_pl = final_pl.filter(
         pl.col("rsID1").is_in(rs_list) &
@@ -347,20 +439,27 @@ def pheno_Scanner_LD_info_dask_pairwise(rs_list, chrom, population, maf_threshol
 
     # 12) Cleanup
     gc.collect()
-    if final_pl.empty:
+    if final_pl.is_empty():
         print("No SNPs found")
 
     return final_pl
 
 
 def pheno_Scanner_process_pairwise(study_df, r2threshold, population, maf_input, chromosome, imp_snp_list):
-    # Fetch LD info data
-    outputData = pheno_Scanner_LD_info_dask_pairwise(list(study_df['SNP']), chromosome, population, maf_input, r2threshold,
-                                            imp_snp_list)
-
+    outputData = pheno_Scanner_LD_info_dask_pairwise(
+        list(study_df['SNP']),
+        chromosome,
+        population,
+        maf_input,
+        r2threshold,
+        imp_snp_list
+    )
     return outputData
 
 
+# -------------------------------------------------------------------
+# 1000G hg38 (pairwise)
+# -------------------------------------------------------------------
 
 def hg38_1kg_LD_info_pairwise(
     rs_list: list[str],
@@ -375,7 +474,7 @@ def hg38_1kg_LD_info_pairwise(
     where both SNPs are in `rs_list` (or in `imp_snp_list` if provided),
     apply MAF and R2 thresholds, and return a Polars DataFrame with allele info.
     """
-    print(f"Loading 1000 Genomes Project (hg38) files ({population}) ...")
+    print(f"Loading 1000 Genomes Project (hg38) files ({population}) ...")
 
     # 1) Validate population
     valid_pops = ['AMR', 'EUR', 'AFR', 'SAS', 'EAS']
@@ -384,32 +483,31 @@ def hg38_1kg_LD_info_pairwise(
 
     # 2) File paths
     maf_file = f'D:/ref_parquet/ref/1000G_hg38/1000G_{population}_0_01.parquet'
-    ld_file  = f'D:/ref_parquet/ref/1000G_hg38/{population}/chr{chrom}_merged.parquet'
+    ld_file = f'D:/ref_parquet/ref/1000G_hg38/{population}/chr{chrom}_merged.parquet'
 
     # 3) Load & filter MAF data
     print("Loading and filtering MAF file...")
     tmp = pl.read_parquet(maf_file)
     maf_df = tmp.rename({
         old: new for old, new in zip(tmp.columns[:6],
-                                     ['CHR','SNP','MAF','POS','REF','ALT'])
+                                     ['CHR', 'SNP', 'MAF', 'POS', 'REF', 'ALT'])
     })
     if maf_threshold is not None:
         maf_df = maf_df.filter(pl.col("MAF") >= maf_threshold)
 
-    # decide which SNP‐set to use
+    # decide which SNP-set to use
     snp_set = set(imp_snp_list) if imp_snp_list else set(rs_list)
     maf_df = maf_df.filter(pl.col("SNP").is_in(snp_set))
 
     # 4) Load & filter LD data
     print("Loading and filtering LD data...")
     ld_df = (
-        pl.read_parquet(ld_file, columns=["CHR_A","SNP_A","CHR_B","SNP_B","R"])
-          .with_columns((pl.col("R") ** 2).alias("R2"))
-          # keep only pairs where both sides are in your SNP set
-          .filter(
-              pl.col("SNP_A").is_in(snp_set) &
-              pl.col("SNP_B").is_in(snp_set)
-          )
+        pl.read_parquet(ld_file, columns=["CHR_A", "SNP_A", "CHR_B", "SNP_B", "R"])
+        .with_columns((pl.col("R") ** 2).alias("R2"))
+        .filter(
+            pl.col("SNP_A").is_in(snp_set) &
+            pl.col("SNP_B").is_in(snp_set)
+        )
     )
     if R2_threshold is not None:
         ld_df = ld_df.filter(pl.col("R2") >= R2_threshold)
@@ -418,16 +516,16 @@ def hg38_1kg_LD_info_pairwise(
     merged = (
         ld_df.join(
             maf_df,
-            left_on=["CHR_A","SNP_A"],
-            right_on=["CHR","SNP"],
+            left_on=["CHR_A", "SNP_A"],
+            right_on=["CHR", "SNP"],
             how="left"
         )
         .rename({
-            "CHR_A":"CHR",
-            "MAF":"MAF_A",
-            "POS":"POS_A",
-            "REF":"REF_A",
-            "ALT":"ALT_A"
+            "CHR_A": "CHR",
+            "MAF": "MAF_A",
+            "POS": "POS_A",
+            "REF": "REF_A",
+            "ALT": "ALT_A"
         })
     )
 
@@ -435,23 +533,23 @@ def hg38_1kg_LD_info_pairwise(
     merged = (
         merged.join(
             maf_df,
-            left_on=["CHR_B","SNP_B"],
-            right_on=["CHR","SNP"],
+            left_on=["CHR_B", "SNP_B"],
+            right_on=["CHR", "SNP"],
             how="left"
         )
         .rename({
-            "MAF":"MAF_B",
-            "POS":"POS_B",
-            "REF":"REF_B",
-            "ALT":"ALT_B"
+            "MAF": "MAF_B",
+            "POS": "POS_B",
+            "REF": "REF_B",
+            "ALT": "ALT_B"
         })
         .drop(["CHR_B"])
     )
 
     # 7) Drop any pairs where one allele lacked MAF info
-    merged = merged.drop_nulls(subset=["MAF_A","MAF_B"])
+    merged = merged.drop_nulls(subset=["MAF_A", "MAF_B"])
 
-    # 8) (Re‐)apply MAF threshold on both alleles, if requested
+    # 8) (Re-)apply MAF threshold on both alleles, if requested
     if maf_threshold is not None:
         merged = merged.filter(
             (pl.col("MAF_A") >= maf_threshold) &
@@ -460,9 +558,9 @@ def hg38_1kg_LD_info_pairwise(
 
     # 9) Reorder columns for readability
     preferred = [
-        "SNP_A","CHR","POS_A","SNP_B","POS_B",
-        "REF_A","ALT_A","MAF_A","REF_B","ALT_B","MAF_B",
-        "R","R2"
+        "SNP_A", "CHR", "POS_A", "SNP_B", "POS_B",
+        "REF_A", "ALT_A", "MAF_A", "REF_B", "ALT_B", "MAF_B",
+        "R", "R2"
     ]
     cols = merged.columns
     final_cols = [c for c in preferred if c in cols] + [c for c in cols if c not in preferred]
@@ -472,13 +570,12 @@ def hg38_1kg_LD_info_pairwise(
         pl.col("SNP_A").is_in(snp_set) &
         pl.col("SNP_B").is_in(snp_set)
     )
-   # print (merged)
-    # return with your preferred column order
+
     return merged.select(final_cols)
 
 
 def hg38_1kg_process_pairwise(
-    study_df: pl.DataFrame,
+    study_df,
     r2threshold: float | None,
     population: str,
     maf_input: float | None,
@@ -499,8 +596,9 @@ def hg38_1kg_process_pairwise(
     )
 
 
-
-
+# -------------------------------------------------------------------
+# 1000G hg38 (non-pairwise)
+# -------------------------------------------------------------------
 
 def hg38_1kg_LD_info(rs_list, chrom, population, maf_threshold, R2_threshold, imp_snp_list):
     print(f"Loading 1000 Genomes Project (hg38) files ({population}) ...")
@@ -511,18 +609,15 @@ def hg38_1kg_LD_info(rs_list, chrom, population, maf_threshold, R2_threshold, im
         raise ValueError(f"Population '{population}' not available. Choose from: {valid_pops}")
 
     # 2) File paths
-
     maf_file = f'D:/ref_parquet/ref/1000G_hg38/1000G_{population}_0_01.parquet'
     ld_file = f'D:/ref_parquet/ref/1000G_hg38/{population}/chr{chrom}_merged.parquet'
 
-     # 3) Load and filter MAF file early
+    # 3) Load and filter MAF file early
     print("Loading and filtering MAF file...")
-
-
-
-    maf_df = pl.read_parquet(maf_file ).rename({
-        maf_col: new_col for maf_col, new_col in zip(
-            pl.read_parquet(maf_file).columns[:6],
+    tmp = pl.read_parquet(maf_file)
+    maf_df = tmp.rename({
+        old: new for old, new in zip(
+            tmp.columns[:6],
             ['CHR', 'SNP', 'MAF', 'POS', 'REF', 'ALT']
         )
     })
@@ -564,7 +659,7 @@ def hg38_1kg_LD_info(rs_list, chrom, population, maf_threshold, R2_threshold, im
         "POS": "POS_A",
         "REF": "REF_A",
         "ALT": "ALT_A"
-    }) # Remove duplicated join columns
+    })
 
     # 6) Join with allele B
     merged = merged.join(
@@ -577,7 +672,7 @@ def hg38_1kg_LD_info(rs_list, chrom, population, maf_threshold, R2_threshold, im
         "POS": "POS_B",
         "REF": "REF_B",
         "ALT": "ALT_B"
-    }).drop(["CHR_B"])  # Drop redundant CHR and SNP columns
+    }).drop(["CHR_B"])
 
     # 7) Final MAF filtering
     if maf_threshold is not None:
@@ -591,7 +686,6 @@ def hg38_1kg_LD_info(rs_list, chrom, population, maf_threshold, R2_threshold, im
         "REF_A", "ALT_A", "MAF_A", "REF_B", "ALT_B", "MAF_B",
         "R", "R2"
     ]
-    # Ensure all columns exist before reordering
     existing_columns = merged.columns
     final_order = [col for col in preferred_order if col in existing_columns] + [
         col for col in existing_columns if col not in preferred_order
@@ -602,16 +696,23 @@ def hg38_1kg_LD_info(rs_list, chrom, population, maf_threshold, R2_threshold, im
 
 
 def hg38_1kg_process(study_df, r2threshold, population, maf_input, chromosome, imp_snp_list):
-    # Fetch LD info data
-
-    outputData = hg38_1kg_LD_info(list(study_df['SNP']), chromosome, population, maf_input, r2threshold, imp_snp_list)
-
-
+    outputData = hg38_1kg_LD_info(
+        list(study_df['SNP']),
+        chromosome,
+        population,
+        maf_input,
+        r2threshold,
+        imp_snp_list
+    )
     return outputData
+
+
+# -------------------------------------------------------------------
+# HapMap (non-pairwise)
+# -------------------------------------------------------------------
 
 def Hap_Map_LD_info_dask(rs_list, chrom, population, maf_threshold, R2_threshold, imp_snp_list):
     print(f"Loading Hap Map files ({population}) ...")
-
 
     # 1) Validate population
     valid_pops = ['YRI', 'CHB', 'JPT', 'CEU', 'MKK', 'LWK',
@@ -626,33 +727,26 @@ def Hap_Map_LD_info_dask(rs_list, chrom, population, maf_threshold, R2_threshold
     # 3) Read and preprocess MAF table
     maf_df = (
         pl.read_parquet(maf_file)
-        # compute MAF as 'otherallele_freq'
         .with_columns(pl.col("otherallele_freq").alias("MAF"))
-        # keep only the needed columns
         .select(["rs#", "refallele", "otherallele", "MAF"])
-        # rename to match downstream joins
         .rename({
             "rs#": "rsID",
             "refallele": "REF",
             "otherallele": "ALT"
         })
-        # filter on MAF threshold
         .filter(pl.col("MAF") >= float(maf_threshold))
     )
 
     # 4) Read and preprocess LD table
-    #    Parquet likely comes with integer column names (0,1,2,…). We filter & rename by position.
     ld_raw = pl.read_parquet(ld_file)
-    cols = ld_raw.columns  # e.g. ['0','1','2',…] or positional ints
+    cols = ld_raw.columns
 
     ld_df = (
         ld_raw
-        # keep only pairs where alleles differ and R2 >= threshold
         .filter(
             (pl.col(cols[3]) != pl.col(cols[4])) &
             (pl.col(cols[6]) >= float(R2_threshold))
         )
-        # rename the first 7 columns to names
         .rename({
             cols[0]: "pos1",
             cols[1]: "pos2",
@@ -662,14 +756,11 @@ def Hap_Map_LD_info_dask(rs_list, chrom, population, maf_threshold, R2_threshold
             cols[5]: "Dprime",
             cols[6]: "R2"
         })
-        # drop any extra columns beyond the 7 we care about
         .select(["pos1", "pos2", "pop", "rsID1", "rsID2", "Dprime", "R2"])
     )
 
     # 5) Join LD ↔ MAF on rsID1 and rsID2
-    #    First join on rsID1 (adds REF, ALT, MAF from maf_df)
     tmp = ld_df.join(maf_df, left_on="rsID1", right_on="rsID", how="inner")
-    #    Then join that result on rsID2 (suffix="_2" for the second maf columns)
     merged = tmp.join(
         maf_df,
         left_on="rsID2",
@@ -678,7 +769,6 @@ def Hap_Map_LD_info_dask(rs_list, chrom, population, maf_threshold, R2_threshold
         suffix="_2"
     )
 
-    # 6) Select & reorder columns, and rename duplicates
     result = merged.select([
         pl.col("pos1"),
         pl.col("pos2"),
@@ -694,7 +784,6 @@ def Hap_Map_LD_info_dask(rs_list, chrom, population, maf_threshold, R2_threshold
         pl.col("Dprime")
     ])
 
-    # 7) Apply the user’s SNP‐list filter
     if imp_snp_list:
         result = result.filter(
             pl.col("rsID1").is_in(rs_list) &
@@ -703,43 +792,35 @@ def Hap_Map_LD_info_dask(rs_list, chrom, population, maf_threshold, R2_threshold
     else:
         result = result.filter(pl.col("rsID1").is_in(rs_list))
 
-    # # 8) Rename MAF columns to ALT_AF and convert to Pandas
-    # final_pl = result.rename({
-    # "MAF1": "ALT_AF1",
-    # "MAF2": "ALT_AF2"
-    # })
-
-    # # Convert to Pandas and reset index
-    # final_pd = result.to_pandas().reset_index(drop=True)
-
-    # 9) Clean up
     del ld_raw, ld_df, maf_df, tmp, merged
     gc.collect()
-
-
 
     return result
 
 
 def Hap_Map_process(study_df, r2threshold, population, maf_input, chromosome, imp_snp_list):
-    # Fetch LD info data
-    outputData = Hap_Map_LD_info_dask(list(study_df['SNP']), chromosome, population, maf_input, r2threshold,
-                                      imp_snp_list)
-
-
-
+    outputData = Hap_Map_LD_info_dask(
+        list(study_df['SNP']),
+        chromosome,
+        population,
+        maf_input,
+        r2threshold,
+        imp_snp_list
+    )
     return outputData
 
 
+# -------------------------------------------------------------------
+# PhenoScanner (non-pairwise)
+# -------------------------------------------------------------------
+
 def pheno_Scanner_LD_info_dask(rs_list, chrom, population, maf_threshold, R2_threshold, imp_snp_list):
-    # 1) Enforce minimum R2 threshold
     if R2_threshold < 0.8:
         print("Pheno Scanner includes data with R2 ≥ 0.8. Setting R2_threshold = 0.8")
         R2_threshold = 0.8
 
     print("Building lazy plan for Pheno Scanner files...")
 
-    # 2) Paths & pop mapping
     maf_file = "D:/ref_parquet/ref/Pheno_Scanner/1000G.parquet"
     ld_file = f"D:/ref_parquet/ref/Pheno_Scanner/1000G_{population}/1000G_{population}_chr{chrom}.parquet"
     pop_map = {"EUR": "eur", "EAS": "eas", "AFR": "afr", "AMR": "amr", "SAS": "sas"}
@@ -747,7 +828,6 @@ def pheno_Scanner_LD_info_dask(rs_list, chrom, population, maf_threshold, R2_thr
     if maf_pop is None:
         raise ValueError(f"Unsupported population: {population}")
 
-    # 3) First MAF scan (for ref side → MAF1)
     maf1_lazy = (
         pl.scan_parquet(maf_file)
         .select(["hg19_coordinates", "chr", "rsid", maf_pop, "a1", "a2"])
@@ -767,7 +847,6 @@ def pheno_Scanner_LD_info_dask(rs_list, chrom, population, maf_threshold, R2_thr
         .select(["ref_hg19_coordinates", "ref_rsid", "MAF1", "ALT1", "REF1"])
     )
 
-    # 4) LD scan
     ld_lazy = (
         pl.scan_parquet(ld_file)
         .select(["ref_hg19_coordinates", "ref_rsid", "rsid", "r2", "r", "dprime"])
@@ -777,7 +856,6 @@ def pheno_Scanner_LD_info_dask(rs_list, chrom, population, maf_threshold, R2_thr
         )
     )
 
-    # 5) Second MAF scan (for query side → MAF2), keep `rsid` for join!
     maf2_lazy = (
         pl.scan_parquet(maf_file)
         .select(["hg19_coordinates", "chr", "rsid", maf_pop, "a1", "a2"])
@@ -793,18 +871,15 @@ def pheno_Scanner_LD_info_dask(rs_list, chrom, population, maf_threshold, R2_thr
             "a1": "ALT2",
             "a2": "REF2",
         })
-        # note: we keep `rsid` here so we can join on it
         .select(["pos2(hg19)", "rsid", "MAF2", "ALT2", "REF2"])
     )
 
-    # 6) Join the three pieces
     joined = (
         ld_lazy
         .join(maf1_lazy, on="ref_rsid", how="inner")
         .join(maf2_lazy, on="rsid", how="inner")
     )
 
-    # 7) Rename LD columns & the `rsid` from maf2 → final names
     renamed = joined.rename({
         "ref_rsid": "rsID1",
         "rsid": "rsID2",
@@ -812,30 +887,25 @@ def pheno_Scanner_LD_info_dask(rs_list, chrom, population, maf_threshold, R2_thr
         "r2": "R2",
     })
 
-    # 8) Filter by user‐supplied SNP lists
     filtered = renamed.filter(
         pl.col("rsID2").is_in(rs_list) &
         (pl.col("rsID1").is_in(imp_snp_list) if imp_snp_list else pl.lit(True))
     )
 
-    # 9) Extract numeric coords
     with_pos = filtered.with_columns([
         pl.col("pos1(hg19)").str.extract(r".*:(\d+)$", 1).cast(pl.Int64),
         pl.col("pos2(hg19)").str.extract(r".*:(\d+)$", 1).cast(pl.Int64),
     ])
 
-    # 10) Final projection/order
     final_lazy = with_pos.select([
         "rsID1", "pos1(hg19)", "rsID2", "dprime",
         "pos2(hg19)", "R2", "r",
         "MAF1", "MAF2", "ALT1", "REF1", "ALT2", "REF2",
     ])
 
-    # 11) Execute in streaming, collect to Polars → pandas
     final_pl = final_lazy.collect()
     final_pd = final_pl.to_pandas()
 
-    # 12) Cleanup
     gc.collect()
     if final_pd.empty:
         print("No SNPs found")
@@ -844,60 +914,67 @@ def pheno_Scanner_LD_info_dask(rs_list, chrom, population, maf_threshold, R2_thr
 
 
 def pheno_Scanner_process(study_df, r2threshold, population, maf_input, chromosome, imp_snp_list):
-    # Fetch LD info data
-    outputData = pheno_Scanner_LD_info_dask(list(study_df['SNP']), chromosome, population, maf_input, r2threshold,
-                                            imp_snp_list)
-
+    outputData = pheno_Scanner_LD_info_dask(
+        list(study_df['SNP']),
+        chromosome,
+        population,
+        maf_input,
+        r2threshold,
+        imp_snp_list
+    )
     return outputData
 
+
+# -------------------------------------------------------------------
+# TOP-LD (non-pairwise)
+# -------------------------------------------------------------------
 
 def TOP_LD_info(rs_list, chrom, population, maf_threshold, R2_threshold, imp_snp_list=None):
     print("Loading TOP-LD files...")
 
-    # 1) Combine rsIDs up‐front
+    # 1) Combine rsIDs up-front
     if imp_snp_list:
         all_rsids = list(set(rs_list) | set(imp_snp_list))
     else:
         all_rsids = rs_list
 
-    # 2) Lazy‐scan the MAF file, project only needed cols, then filter
     maf_path = (
         f"D:/ref_parquet/ref/TOP_LD/{population}/SNV/"
         f"{population}_chr{chrom}_no_filter_0.2_1000000_info_annotation.parquet"
     )
-    maf_lazy = (
-        pl.scan_parquet(maf_path)
-        .select(["Position", "rsID", "MAF", "REF", "ALT"])
-        .filter(pl.col("MAF") >= maf_threshold)
-        .filter(pl.col("rsID").is_in(all_rsids))
-    )
-
-    # 3) Lazy‐scan the LD file, project and filter by R²
     ld_path = (
         f"D:/ref_parquet/ref/TOP_LD/{population}/SNV/"
         f"{population}_chr{chrom}_no_filter_0.2_1000000_LD.parquet"
     )
+
+    maf_lazy = (
+        pl.scan_parquet(maf_path)
+        .select(["Uniq_ID", "rsID", "MAF", "REF", "ALT"])
+        .filter(pl.col("MAF") >= maf_threshold)
+        .filter(pl.col("rsID").is_in(all_rsids))
+    )
+
     ld_lazy = (
         pl.scan_parquet(ld_path)
-        .select(["SNP1", "SNP2", "R2", "+/-corr", "Dprime"])
+        .select(["Uniq_ID_1", "Uniq_ID_2", "R2", "+/-corr", "Dprime"])
         .filter(pl.col("R2") >= R2_threshold)
     )
 
     # 4) Prepare two MAF views for joining
     maf1 = maf_lazy.rename({
-        "Position": "SNP1", "rsID": "rsID1", "MAF": "MAF1",
+        "Uniq_ID": "Uniq_ID_1", "rsID": "rsID1", "MAF": "MAF1",
         "REF": "REF1", "ALT": "ALT1"
     })
     maf2 = maf_lazy.rename({
-        "Position": "SNP2", "rsID": "rsID2", "MAF": "MAF2",
+        "Uniq_ID": "Uniq_ID_2", "rsID": "rsID2", "MAF": "MAF2",
         "REF": "REF2", "ALT": "ALT2"
     })
 
     # 5) Join LD ↔ MAF1 ↔ MAF2 all lazily
     joined = (
         ld_lazy
-        .join(maf1, on="SNP1", how="inner")
-        .join(maf2, on="SNP2", how="inner")
+        .join(maf1, on="Uniq_ID_1", how="inner")
+        .join(maf2, on="Uniq_ID_2", how="inner")
     )
 
     # 6) If you provided an imp_snp_list, filter rsID roles
@@ -909,8 +986,8 @@ def TOP_LD_info(rs_list, chrom, population, maf_threshold, R2_threshold, imp_snp
 
     # 7) Select + rename final output columns
     final_lazy = joined.select([
-        pl.col("SNP1").alias("pos1"),
-        pl.col("SNP2").alias("pos2"),
+        pl.col("Uniq_ID_1").alias("pos1"),
+        pl.col("Uniq_ID_2").alias("pos2"),
         "R2", "+/-corr", "Dprime",
         "rsID1", "rsID2",
         "MAF1", "MAF2",
@@ -932,179 +1009,191 @@ def TOP_LD_info(rs_list, chrom, population, maf_threshold, R2_threshold, imp_snp
 
 
 def TOP_LD_process(study_df, r2threshold, population, maf_input, chromosome, imp_snp_list):
-    # Fetch LD info data
-
-    outputData = TOP_LD_info(list(study_df['SNP']), chromosome, population, maf_input, r2threshold, imp_snp_list)
-
+    outputData = TOP_LD_info(
+        list(study_df['SNP']),
+        chromosome,
+        population,
+        maf_input,
+        r2threshold,
+        imp_snp_list
+    )
     return outputData
 
 
+# -------------------------------------------------------------------
+# High-level drivers
+# -------------------------------------------------------------------
+
 def process_data(file_path, r2threshold, population, maf_input, ref_file, imp_snp_list):
+    """
+    Non-pairwise LD extraction across chromosomes.
+    """
     final_results_list = []
 
     study_df = pd.read_csv(file_path, sep="\t")
     print(study_df)
     chroms = list(set(study_df['CHR']))
 
-    # Take only 22 chromosomes
+    # Take only autosomes 1-22
     chroms = [chrom for chrom in chroms if not str(chrom).isdigit() or int(chrom) <= 22]
     ref_panel = ref_file
 
-
-
-
-    # Depending on the reference panel...
     if ref_panel == '1000G_hg38':
         for chrom in chroms:
             final_data = hg38_1kg_process(study_df, r2threshold, population, maf_input, chrom, imp_snp_list)
-
-            # Save individual chromosome LD info if needed
-            # final_data.write_csv(f"LD_info_chr{chrom}.txt", separator="\t")
-            # print(f"Check 'LD_info_chr{chrom}.txt' for LD information")
-
             final_results_list.append(final_data)
 
-
-        # Concatenate Polars DataFrames
         final_df = pl.concat(final_results_list)
-
-        # Write final concatenated DataFrame to file
         final_df.write_csv("LD_info_chr_all.txt", separator="\t")
         print("Check 'LD_info_chr_all.txt' for results")
 
-    if ref_panel == 'TOP_LD':
+    elif ref_panel == 'TOP_LD':
         for chrom in chroms:
             final_data = TOP_LD_process(study_df, r2threshold, population, maf_input, chrom, imp_snp_list)
-
-            # Save individual chromosome LD info if needed
-
-
             final_results_list.append(final_data)
 
-
-        # Concatenate Polars DataFrames
         final_df = pd.concat(final_results_list)
-
-        # Write final concatenated DataFrame to file
-        final_df.to_csv("LD_info_chr_all.txt", sep="\t")
+        final_df.to_csv("LD_info_chr_all.txt", sep="\t", index=False)
         print("Check 'LD_info_chr_all.txt' for results")
 
-    if ref_panel == 'Pheno_Scanner':
+    elif ref_panel == 'Pheno_Scanner':
         for chrom in chroms:
             final_data = pheno_Scanner_process(study_df, r2threshold, population, maf_input, chrom, imp_snp_list)
-
-            # Save individual chromosome LD info if needed
-            final_data.to_csv(f"LD_info_chr{chrom}.txt", sep="\t")
+            final_data.to_csv(f"LD_info_chr{chrom}.txt", sep="\t", index=False)
             print(f"Check 'LD_info_chr{chrom}.txt' for LD information")
-
             final_results_list.append(final_data)
-
 
         final_df = pd.concat(final_results_list)
-
-        # Write final concatenated DataFrame to file
-        final_df.to_csv("LD_info_chr_all.txt", sep="\t")
+        final_df.to_csv("LD_info_chr_all.txt", sep="\t", index=False)
         print("Check 'LD_info_chr_all.txt' for results")
 
-    if ref_panel == 'Hap_Map':
+    elif ref_panel == 'Hap_Map':
         for chrom in chroms:
             final_data = Hap_Map_process(study_df, r2threshold, population, maf_input, chrom, imp_snp_list)
-
-            # # Save individual chromosome LD info if needed
-            #
-            # print(f"Check 'LD_info_chr{chrom}.txt' for LD information")
-
             final_results_list.append(final_data)
 
-    
-        # Concatenate Polars DataFrames
         final_df = pl.concat(final_results_list)
-
-        # Write final concatenated DataFrame to file
         final_df.write_csv("LD_info_chr_all.txt", separator="\t")
         print("Check 'LD_info_chr_all.txt' for results")
 
+    else:
+        raise ValueError(f"Unsupported ref_panel: {ref_panel}")
 
 
-def process_data_pairwise(file_path, r2threshold, population, maf_input, ref_file, imp_snp_list):
+def process_data_pairwise(
+    file_path,
+    r2threshold,
+    population,
+    maf_input,
+    ref_file,
+    imp_snp_list,
+    ld_prune: bool = False,
+    ld_prune_p_col: str | None = "P",
+    ld_prune_out_prefix: str = "LD_pruned"
+):
+    """
+    Pairwise LD extraction across chromosomes.
+
+    If ld_prune == True, also perform LD pruning on the input GWAS
+    and return (final_ld_df, kept_gwas_df, pruned_gwas_df).
+    """
     final_results_list = []
 
     study_df = pd.read_csv(file_path, sep="\t")
     print(study_df)
 
-    #chroms = list(set(study_df['CHR']))
-
-    # Take only 22 chromosomes
-    #  chroms = [chrom for chrom in chroms if not str(chrom).isdigit() or int(chrom) <= 22]
     ref_panel = ref_file
-
-
-
+    final_df = None
+    kept_gwas = None
+    pruned_gwas = None
 
     # Depending on the reference panel...
     if ref_panel == '1000G_hg38':
-        for chrom in range(1,23):
+        for chrom in range(1, 23):
             final_data = hg38_1kg_process_pairwise(study_df, r2threshold, population, maf_input, chrom, imp_snp_list)
-
-            # # Save individual chromosome LD info if needed
-            # final_data.write_csv(f"LD_info_chr{chrom}.txt", separator="\t")
-            # print(f"Check 'LD_info_chr{chrom}.txt' for LD information")
-
             final_results_list.append(final_data)
 
-
-        # Write final concatenated DataFrame to file
         final_df = pl.concat(final_results_list)
         final_df.write_csv("LD_info_chr_all_pairwise.txt", separator="\t")
         print("Check 'LD_info_chr_all_pairwise.txt' for results")
 
+        if ld_prune:
+            kept_gwas, pruned_gwas = ld_prune_pairs(
+                study_df=study_df,
+                ld_pairs=final_df,
+                snp_col="SNP",
+                p_col=ld_prune_p_col,
+                snp1_col="SNP_A",
+                snp2_col="SNP_B",
+            )
 
-    if ref_panel == 'TOP_LD':
-        for chrom in range(1,23):
+    elif ref_panel == 'TOP_LD':
+        for chrom in range(1, 23):
             final_data = TOP_LD_process_pairwise(study_df, r2threshold, population, maf_input, chrom, imp_snp_list)
-
-            # # Save individual chromosome LD info if needed
-            # final_data.write_csv(f"LD_info_chr{chrom}.txt", separator="\t")
-            # print(f"Check 'LD_info_chr{chrom}.txt' for LD information")
-
             final_results_list.append(final_data)
 
-
-        # Write final concatenated DataFrame to file
         final_df = pl.concat(final_results_list)
         final_df.write_csv("LD_info_chr_all_pairwise.txt", separator="\t")
         print("Check 'LD_info_chr_all_pairwise.txt' for results")
 
-    if ref_panel == 'Hap_Map':
-        for chrom in range(1,23):
+        if ld_prune:
+            kept_gwas, pruned_gwas = ld_prune_pairs(
+                study_df=study_df,
+                ld_pairs=final_df,
+                snp_col="SNP",
+                p_col=ld_prune_p_col,
+                snp1_col="rsID1",
+                snp2_col="rsID2",
+            )
+
+    elif ref_panel == 'Hap_Map':
+        for chrom in range(1, 23):
             final_data = Hap_Map_process_pairwise(study_df, r2threshold, population, maf_input, chrom, imp_snp_list)
-
-            # # Save individual chromosome LD info if needed
-            # final_data.write_csv(f"LD_info_chr{chrom}.txt", separator="\t")
-            # print(f"Check 'LD_info_chr{chrom}.txt' for LD information")
-
             final_results_list.append(final_data)
 
-
-        # Write final concatenated DataFrame to file
         final_df = pl.concat(final_results_list)
         final_df.write_csv("LD_info_chr_all_pairwise.txt", separator="\t")
         print("Check 'LD_info_chr_all_pairwise.txt' for results")
 
-    if ref_panel == 'Pheno_Scanner':
+        if ld_prune:
+            kept_gwas, pruned_gwas = ld_prune_pairs(
+                study_df=study_df,
+                ld_pairs=final_df,
+                snp_col="SNP",
+                p_col=ld_prune_p_col,
+                snp1_col="rsID1",
+                snp2_col="rsID2",
+            )
+
+    elif ref_panel == 'Pheno_Scanner':
         for chrom in range(1, 23):
             final_data = pheno_Scanner_process_pairwise(study_df, r2threshold, population, maf_input, chrom, imp_snp_list)
-
-            # # Save individual chromosome LD info if needed
-            # final_data.write_csv(f"LD_info_chr{chrom}.txt", separator="\t")
-            # print(f"Check 'LD_info_chr{chrom}.txt' for LD information")
-
             final_results_list.append(final_data)
 
-        # Write final concatenated DataFrame to file
         final_df = pl.concat(final_results_list)
         final_df.write_csv("LD_info_chr_all_pairwise.txt", separator="\t")
         print("Check 'LD_info_chr_all_pairwise.txt' for results")
 
+        if ld_prune:
+            kept_gwas, pruned_gwas = ld_prune_pairs(
+                study_df=study_df,
+                ld_pairs=final_df,
+                snp_col="SNP",
+                p_col=ld_prune_p_col,
+                snp1_col="rsID1",
+                snp2_col="rsID2",
+            )
 
+    else:
+        raise ValueError(f"Unsupported ref_panel: {ref_panel}")
 
+    # Optionally, write pruned GWAS to disk
+    if ld_prune and kept_gwas is not None:
+        kept_gwas.to_csv(f"{ld_prune_out_prefix}_kept.txt", sep="\t", index=False)
+        pruned_gwas.to_csv(f"{ld_prune_out_prefix}_pruned.txt", sep="\t", index=False)
+        print(
+            f"LD-pruned GWAS written to '{ld_prune_out_prefix}_kept.txt' (kept) "
+            f"and '{ld_prune_out_prefix}_pruned.txt' (pruned)."
+        )
+
+    return final_df, kept_gwas, pruned_gwas
