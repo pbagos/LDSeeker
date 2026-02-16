@@ -2,7 +2,7 @@
 
  
 
-**LDSeeker** is a high-performance Python tool for exploring Linkage Disequilibrium (LD) in Genome-Wide Association Studies (GWAS), using multiple reference panels
+**LDSeeker** is a high-performance tool for exploring Linkage Disequilibrium (LD) in Genome-Wide Association Studies (GWAS), using multiple reference panels
 
 ## **Web Tool:** 
 
