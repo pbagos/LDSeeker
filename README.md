@@ -13,7 +13,6 @@ A web-based version is available at [https://compgen.dib.uth.gr/LDSeeker/](https
 1. **LD Annotation:** Identify LD partners for input SNPs within a reference panel.  
 2. **Pairwise LD & Pruning:** Calculate LD between SNPs in a dataset and perform "greedy" pruning (clumping) to identify independent signals.
 
-## **Table of Contents**
 
 ## **Table of Contents**
 
