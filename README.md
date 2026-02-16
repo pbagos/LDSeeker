@@ -13,18 +13,20 @@
 
 ## **Table of Contents**
 
-* [Features](https://www.google.com/search?q=%23features)  
-* [Installation Guide](https://www.google.com/search?q=%23requirements)  
-* [Data Configuration](https://www.google.com/search?q=%23data-configuration)  
-* [Usage](https://www.google.com/search?q=%23usage)  
-  * [LD Annotation](https://www.google.com/search?q=%231-basic-ld-annotation-non-pairwise)  
-  * [Pairwise LD](https://www.google.com/search?q=%232-pairwise-ld-calculation)  
-  * [LD Pruning](https://www.google.com/search?q=%233-ld-pruning-clumping)  
-* [Arguments](https://www.google.com/search?q=%23arguments)  
-* [Input File Format](https://www.google.com/search?q=%23input-file-format)  
-* [Output Files](https://www.google.com/search?q=%23output-files)  
-* [License](https://www.google.com/search?q=%23license)
+## **Table of Contents**
 
+* [Features](#features)  
+* [Installation Guide](#installation-guide)  
+* [Data Configuration](#data-configuration)  
+  * [Supported Reference Panels](#supported-reference-panels)  
+* [Usage](#usage)  
+  * [1. Basic LD Annotation (Non-Pairwise)](#1-basic-ld-annotation-non-pairwise)  
+  * [2. Pairwise LD Calculation](#2-pairwise-ld-calculation)  
+  * [3. LD Pruning (Clumping)](#3-ld-pruning-clumping)  
+* [Arguments](#arguments)  
+* [Input File Format](#input-file-format)  
+* [Output Files](#output-files)  
+* [License](#license)
 ## **Features**
 
 * **Multi-Panel Support:** Seamlessly switch between major reference panels (1000 Genomes, UK Biobank, HGDP, TOP-LD, etc.).  
