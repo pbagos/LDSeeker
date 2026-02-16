@@ -14,7 +14,7 @@
 ## **Table of Contents**
 
 * [Features](https://www.google.com/search?q=%23features)  
-* [Requirements](https://www.google.com/search?q=%23requirements)  
+* [Installation Guide](https://www.google.com/search?q=%23requirements)  
 * [Data Configuration](https://www.google.com/search?q=%23data-configuration)  
 * [Usage](https://www.google.com/search?q=%23usage)  
   * [LD Annotation](https://www.google.com/search?q=%231-basic-ld-annotation-non-pairwise)  
@@ -33,16 +33,28 @@
 * **LD Pruning (Clumping):** Automated "greedy" pruning to filter GWAS results down to independent loci based on P-values and LD thresholds.  
 * **Flexible Filtering:** Filter by ![][image1], MAF (Minor Allele Frequency), and P-value thresholds.
 
-## **Requirements**
+## **Installation Guide**
 
-* Python 3.9+  
-* **Polars**  
-* **Pandas**
+LDSeeker is written in Python (ver. 3.10)
 
-Install dependencies via pip:
+1)	Clone or download LDSeeker from: https://github.com/pbagos/LDSeeker
+  ```
+  git clone  https://github.com/pbagos/LDSeeker
+  ```
 
-pip install polars pandas
+2)	After downloading the .zip folder of LDSeeker from GitHub, extract it to a working directory. 
 
+3)	Το install the requirements, pip needs to be installed. Download the script for pip, from: https://bootstrap.pypa.io/get-pip.py.
+
+4)	Open a terminal/command prompt, cd to the folder containing the get-pip.py file and run:
+    ```
+    python get-pip.py
+    ```
+5)	To install the mentioned requirements with pip, open a terminal/command prompt and run:
+    ```
+    pip install -r  requirements.txt
+    ```
+ 
 ## **Data Configuration**
 
 **⚠️ Important:** LDSeeker\_functions.py expects reference panel data (Parquet files) to be located in specific directories.
@@ -68,18 +80,19 @@ The tool expects Parquet files for the following panels:
 ### **1\. Basic LD Annotation (Non-Pairwise)**
 
 Finds all variants in the reference panel that are in LD with your input SNPs.
-
+```
 python LDSeeker.py \\  
   \--file-path input\_gwas.txt \\  
   \--r2threshold 0.6 \\  
   \--pop EUR \\  
   \--maf 0.01 \\  
   \--ref 1000G\_hg38
-
+```
 ### **2\. Pairwise LD Calculation**
 
 Calculates LD specifically *between* the SNPs provided in your input file.
 
+```
 python LDSeeker.py \\  
   \--file-path input\_gwas.txt \\  
   \--r2threshold 0.1 \\  
@@ -87,11 +100,11 @@ python LDSeeker.py \\
   \--maf 0.01 \\  
   \--ref 1000G\_hg38 \\  
   \--pairwise YES
-
+```
 ### **3\. LD Pruning (Clumping)**
 
 Calculates pairwise LD and removes SNPs that are in high LD with a more significant SNP (lower P-value).
-
+```
 python LDSeeker.py \\  
   \--file-path input\_gwas.txt \\  
   \--r2threshold 0.2 \\  
@@ -103,7 +116,7 @@ python LDSeeker.py \\
   \--ld-prune-col P \\  
   \--ld-prune-threshold 5e-8 \\  
   \--ld-prune-mode below
-
+```
 ## **Arguments**
 
 | Argument | Required | Default | Description |
