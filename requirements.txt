@@ -1,0 +1,4 @@
+polars~=1.30.0
+pandas~=2.3.3
+plotly~=5.14.1
+tqdm~=4.67.0
