@@ -1,0 +1,158 @@
+# **LDSeeker**
+
+ 
+
+**LDSeeker** is a high-performance Python tool for exploring Linkage Disequilibrium (LD) in Genome-Wide Association Studies (GWAS). Leveraging the speed of **Polars**, it processes large-scale reference panels to perform LD annotation, pairwise calculation, and clumping.
+
+**Web Tool:** A web-based version is available at [https://compgen.dib.uth.gr/LDSeeker/](https://compgen.dib.uth.gr/LDSeeker/)
+
+## **Key Capabilities**
+
+1. **LD Annotation:** Identify LD partners for input SNPs within a reference panel.  
+2. **Pairwise LD & Pruning:** Calculate LD between SNPs in a dataset and perform "greedy" pruning (clumping) to identify independent signals.
+
+## **Table of Contents**
+
+* [Features](https://www.google.com/search?q=%23features)  
+* [Requirements](https://www.google.com/search?q=%23requirements)  
+* [Data Configuration](https://www.google.com/search?q=%23data-configuration)  
+* [Usage](https://www.google.com/search?q=%23usage)  
+  * [LD Annotation](https://www.google.com/search?q=%231-basic-ld-annotation-non-pairwise)  
+  * [Pairwise LD](https://www.google.com/search?q=%232-pairwise-ld-calculation)  
+  * [LD Pruning](https://www.google.com/search?q=%233-ld-pruning-clumping)  
+* [Arguments](https://www.google.com/search?q=%23arguments)  
+* [Input File Format](https://www.google.com/search?q=%23input-file-format)  
+* [Output Files](https://www.google.com/search?q=%23output-files)  
+* [License](https://www.google.com/search?q=%23license)
+
+## **Features**
+
+* **Multi-Panel Support:** Seamlessly switch between major reference panels (1000 Genomes, UK Biobank, HGDP, TOP-LD, etc.).  
+* **High Performance:** Built on **Polars** for extremely fast processing of large Parquet/TSV datasets.  
+* **Pairwise LD Calculation:** Calculate ![][image1] and ![][image2] between provided variants.  
+* **LD Pruning (Clumping):** Automated "greedy" pruning to filter GWAS results down to independent loci based on P-values and LD thresholds.  
+* **Flexible Filtering:** Filter by ![][image1], MAF (Minor Allele Frequency), and P-value thresholds.
+
+## **Requirements**
+
+* Python 3.9+  
+* **Polars**  
+* **Pandas**
+
+Install dependencies via pip:
+
+pip install polars pandas
+
+## **Data Configuration**
+
+**⚠️ Important:** LDSeeker\_functions.py expects reference panel data (Parquet files) to be located in specific directories.
+
+Before running the tool, choose one of the following options:
+
+1. **Option A (Standard):** Create a ref/ directory in the project root and move your reference data there.  
+2. **Option B (Custom):** Edit LDSeeker\_functions.py and update the \_file variable definitions (e.g., maf\_file, ld\_file) to point to your custom data paths.
+
+### **Supported Reference Panels**
+
+The tool expects Parquet files for the following panels:
+
+* **1000G\_hg38** (Standard & High Coverage)  
+* **UKBB** (UK Biobank)  
+* **HGDP** (Human Genome Diversity Project)  
+* **TOP\_LD**  
+* **Hap\_Map**  
+* **Pheno\_Scanner**
+
+## **Usage**
+
+### **1\. Basic LD Annotation (Non-Pairwise)**
+
+Finds all variants in the reference panel that are in LD with your input SNPs.
+
+python LDSeeker.py \\  
+  \--file-path input\_gwas.txt \\  
+  \--r2threshold 0.6 \\  
+  \--pop EUR \\  
+  \--maf 0.01 \\  
+  \--ref 1000G\_hg38
+
+### **2\. Pairwise LD Calculation**
+
+Calculates LD specifically *between* the SNPs provided in your input file.
+
+python LDSeeker.py \\  
+  \--file-path input\_gwas.txt \\  
+  \--r2threshold 0.1 \\  
+  \--pop EUR \\  
+  \--maf 0.01 \\  
+  \--ref 1000G\_hg38 \\  
+  \--pairwise YES
+
+### **3\. LD Pruning (Clumping)**
+
+Calculates pairwise LD and removes SNPs that are in high LD with a more significant SNP (lower P-value).
+
+python LDSeeker.py \\  
+  \--file-path input\_gwas.txt \\  
+  \--r2threshold 0.2 \\  
+  \--pop EUR \\  
+  \--maf 0.01 \\  
+  \--ref UKBB \\  
+  \--pairwise YES \\  
+  \--ld-prune YES \\  
+  \--ld-prune-col P \\  
+  \--ld-prune-threshold 5e-8 \\  
+  \--ld-prune-mode below
+
+## **Arguments**
+
+| Argument | Required | Default | Description |
+| :---- | :---- | :---- | :---- |
+| \--file-path | **Yes** | \- | Path to input GWAS summary statistics (Tab-separated). |
+| \--r2threshold | **Yes** | \- | Minimum ![][image1] value (0.0 \- 1.0). |
+| \--pop | **Yes** | \- | Population code (e.g., EUR, AMR, AFR, EAS, SAS). |
+| \--maf | **Yes** | \- | Minor Allele Frequency threshold (e.g., 0.01). |
+| \--ref | No | 1000G\_hg38 | Reference panel (e.g., UKBB, HGDP, TOP\_LD, etc.). |
+| \--pairwise | No | NO | Calculate pairwise LD between input SNPs (YES or NO). |
+| \--imp\_list | No | \- | Path to a file containing a specific list of SNPs to impute/filter (no header). |
+| \--ld-prune | No | NO | Apply LD pruning? (Requires \--pairwise YES). |
+| \--ld-prune-col | No | P | Column name to use for ranking SNPs (usually P-value). |
+| \--ld-prune-prefix | No | LD\_pruned | Prefix for pruning output files. |
+| \--ld-prune-threshold | No | None | Filter input SNPs by this value before pruning (e.g., 0.05). |
+| \--ld-prune-mode | No | below | Keep rows below or above the prune threshold. |
+
+## **Input File Format**
+
+The input file (--file-path) must be a **tab-separated** text file.
+
+| SNP | CHR | P |
+| :---- | :---- | :---- |
+| rs12345 | 1 | 0.05 |
+| rs67890 | 1 | 1.2e-8 |
+
+* **SNP (Required):** The rsID of the variant.  
+* **CHR (Optional):** Chromosome. If present, processing is faster as it targets specific chromosomes.  
+* **P (Conditional):** P-value. Required if using \--ld-prune (or specify another column with \--ld-prune-col).
+
+## **Output Files**
+
+Depending on the mode selected, LDSeeker generates the following TSV files:
+
+1. **LD\_info\_chr\_all.txt**  
+   * Results for standard LD annotation (LD partners found in reference).  
+2. **LD\_info\_chr\_all\_pairwise.txt**  
+   * Matrix/List of pairwise LD values between input SNPs.  
+3. **LD\_pruned\_kept.txt**  
+   * (Pruning mode) The independent SNPs retained after clumping.  
+4. **LD\_pruned\_pruned.txt**  
+   * (Pruning mode) The SNPs removed due to high LD with a lead variant.
+
+## **License**
+
+Copyright (C) 2026 **Pantelis Bagos**.
+
+Freely distributed under the **GNU General Public Licence (GPLv3)**.
+
+[image1]: <data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAA8AAAAVCAYAAACZm7S3AAABAklEQVR4XmNgoBNglZOT8wXiWdLS0sLokvgAC1BTGZBmBHGA7L9ArI2mBjsQExMTB2mQlZX1A/GB7B1A3ICmDCdgBCouFxIS4gNx5OXllwLxHHRFRAGgxv9AihVdnCAAarwuLi7OjS5OEAgKCvLD/ApiwyXQgx9FEgiAgTUZaGsOlMsM5BeBWUDBB6CgB/kFSE8CxaWMjIwqkH8RiBWBWBIkh4yBaozBmkFBj6wAZDJQ7DWKImwAKOkCVKQJxNFQzdEgcSC9DCh3GF09VgBUeBqo4YCoqCgPuhxBALIVloJIBlD/KaGLEwTAaNKHBhTpAJRugfgKujhRABinnOiJZBgDAEB+OYlaoqoJAAAAAElFTkSuQmCC>
+
+[image2]: <data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAABUAAAAZCAYAAADe1WXtAAABPklEQVR4Xu2UvUoDURCFN6gQjFbZdWH/SSeks7DRzsZG7HwE3yCClY0vIIhgkxewtbPSxgeI+ASS0kohFpozMiPryb2rrZgPhixzzszcO2w2CP4daZp28bPA+U+Korj0xCDP831YWlwjQH9HHHE+SJJkuSzLjx/ikesE0TC0z/kvYBhLYHKPNeRuoU3QYNtyuHomJ637ZtATnXJeqKqqrfrEchhwjKYnNdsMi1KUZdkuC4atQp51yHXj1TFxSwqiKFphzag3hX8Hz2/s+QZMV1bgIgzD1XrTX4Gmr4g7zhu45p40hOeFNS9acMZ5QzQ96T1rTvCehlqwzpqhL/kojuM11pzAfNi0K1z9QPUl1ny00HTY1BTaMzw3nPcC84YsH/Hg0C50LeesOcFuOlrgDDR8wh9hM/B9gebM+aNMAdsSZUMPB9lJAAAAAElFTkSuQmCC>
