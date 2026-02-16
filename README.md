@@ -20,7 +20,7 @@
 * [Data Configuration](#data-configuration)  
   * [Supported Reference Panels](#supported-reference-panels)  
 * [Usage](#usage)  
-  * [1. Basic LD Annotation (Non-Pairwise)](#1-basic-ld-annotation-non-pairwise)  
+  * [1. Basic LD Annotation](#1-basic-ld-annotation-non-pairwise)  
   * [2. Pairwise LD Calculation](#2-pairwise-ld-calculation)  
   * [3. LD Pruning (Clumping)](#3-ld-pruning-clumping)  
 * [Arguments](#arguments)  
@@ -30,10 +30,9 @@
 ## **Features**
 
 * **Multi-Panel Support:** Seamlessly switch between major reference panels (1000 Genomes, UK Biobank, HGDP, TOP-LD, etc.).  
-* **High Performance:** Built on **Polars** for extremely fast processing of large Parquet/TSV datasets.  
 * **Pairwise LD Calculation:** Calculate ![][image1] and ![][image2] between provided variants.  
-* **LD Pruning (Clumping):** Automated "greedy" pruning to filter GWAS results down to independent loci based on P-values and LD thresholds.  
-* **Flexible Filtering:** Filter by ![][image1], MAF (Minor Allele Frequency), and P-value thresholds.
+* **LD Pruning (Clumping):** Pruning to filter GWAS results down to independent loci based on LD and  P-value thresholds.  
+
 
 ## **Installation Guide**
 
