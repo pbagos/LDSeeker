@@ -23,7 +23,7 @@ A web-based version is available at [https://compgen.dib.uth.gr/LDSeeker/](https
 * [Usage](#usage)  
   * [1. Basic LD Annotation](#1-basic-ld-annotation-non-pairwise)  
   * [2. Pairwise LD Calculation](#2-pairwise-ld-calculation)  
-  * [3. LD Pruning (Clumping)](#3-ld-pruning-clumping)  
+  * [3. LD Pruning](#3-ld-pruning)  
 * [Arguments](#arguments)  
 * [Input File Format](#input-file-format)  
 * [Output Files](#output-files)  
@@ -143,7 +143,7 @@ python LDSeeker.py \\
   \--ref 1000G\_hg38 \\  
   \--pairwise YES
 ```
-### **3\. LD Pruning (Clumping)**
+### **3\. LD Pruning**
 
 Calculates pairwise LD and removes SNPs that are in high LD with a more significant SNP (lower P-value).
 ```
@@ -167,7 +167,7 @@ python LDSeeker.py \\
 | \--r2threshold | **Yes** | \- | Minimum ![][image1] value (0.0 \- 1.0). |
 | \--pop | **Yes** | \- | Population code (e.g., EUR, AMR, AFR, EAS, SAS). |
 | \--maf | **Yes** | \- | Minor Allele Frequency threshold (e.g., 0.01). |
-| \--ref | No | 1000G\_hg38 | Reference panel (e.g., UKBB, HGDP, TOP\_LD, etc.). |
+| \--ref | No | 1000G\_hg38 | Reference panel (e.g., UKBB, HGDP, TOP\_LD, Hap_Map, 1000G\_hg38\_high\_cov,1000G\_hg38). |
 | \--pairwise | No | NO | Calculate pairwise LD between input SNPs (YES or NO). |
 | \--imp\_list | No | \- | Path to a file containing a specific list of SNPs to impute/filter (no header). |
 | \--ld-prune | No | NO | Apply LD pruning? (Requires \--pairwise YES). |
@@ -198,7 +198,7 @@ Depending on the mode selected, LDSeeker generates the following TSV files:
 2. **LD\_info\_chr\_all\_pairwise.txt**  
    * Matrix/List of pairwise LD values between input SNPs.  
 3. **LD\_pruned\_kept.txt**  
-   * (Pruning mode) The independent SNPs retained after clumping.  
+   * (Pruning mode) The independent SNPs retained after pruning.  
 4. **LD\_pruned\_pruned.txt**  
    * (Pruning mode) The SNPs removed due to high LD with a lead variant.
 
