@@ -13,51 +13,6 @@ A web-based version is available at [https://compgen.dib.uth.gr/LDSeeker/](https
 1. **LD Annotation:** Identify LD partners for input SNPs within a reference panel.  
 2. **Pairwise LD & Pruning:** Calculate LD between SNPs in a dataset and perform pruning to identify independent signals.
 
-### **Supported Reference Panels**
-
-The tool expects Parquet files for the following reference panels and populations:
-
-| Reference Panel | Label | Population Sample | Number of Samples |
-| :--- | :--- | :--- | :--- |
-| **TOP-LD (hg38)** | EUR | European | 13,160 |
-| | AFR | African | 1,335 |
-| | SAS | South Asian | 239 |
-| | EAS | East Asian | 844 |
-| **PhenoScanner (Phase 3, hg19 & hg38)** | EUR | European | 503 |
-| | AFR | African | 661 |
-| | SAS | South Asian | 489 |
-| | EAS | East Asian | 504 |
-| | AMR | American | 347 |
-| **HapMap (hg16)** | ASW | African ancestry in Southwest USA | 90 |
-| | CEU | Utah residents with N/W European ancestry | 180 |
-| | CHB | Han Chinese in Beijing, China | 90 |
-| | CHD | Chinese in Metropolitan Denver, Colorado | 100 |
-| | GIH | Gujarati Indians in Houston, Texas | 100 |
-| | JPT | Japanese in Tokyo, Japan | 91 |
-| | LWK | Luhya in Webuye, Kenya | 100 |
-| | MEX | Mexican ancestry in Los Angeles, California | 90 |
-| | MKK | Maasai in Kinyawa, Kenya | 180 |
-| | TSI | Toscans in Italy | 100 |
-| | YRI | Yoruba in Ibadan, Nigeria | 180 |
-| **RAISS (1000G Phase 3, hg38)** | EUR | European | 632 |
-| | AFR | African | 893 |
-| | SAS | South Asian | 601 |
-| | EAS | East Asian | 585 |
-| | AMR | Admixed American | 490 |
-| **UKBB (hg19)** | EUR | European | 362,446 |
-| | AFR | African | 6,255 |
-| | CSA | Central and South Asian | 8,284 |
-| | EAS | East Asian | 2,700 |
-| | AMR | Admixed American | 987 |
-| | MID | Middle Eastern | 1,567 |
-| **LASI-DAD** | IND | Indian | 2,680 |
-| **HGDP** | EUR | European | 155 |
-| | AFR | African | 104 |
-| | CSA | Central South Asian | 197 |
-| | EAS | East Asian | 223 |
-| | AMR | Admixed American | 61 |
-| | MID | Middle Eastern | 161 |
-| | OCN | Oceanian | 28 |
 
 ## **Table of Contents**
 
@@ -115,12 +70,52 @@ Before running the tool, choose one of the following options:
 
 The tool expects Parquet files for the following panels:
 
-* **1000G\_hg38** (Standard & High Coverage)  
-* **UKBB** (UK Biobank)  
-* **HGDP** (Human Genome Diversity Project)  
-* **TOP\_LD**  
-* **Hap\_Map**  
-* **Pheno\_Scanner**
+### **Supported Reference Panels**
+
+The tool expects Parquet files for the following reference panels and populations:
+
+| Reference Panel | Label | Population Sample | Number of Samples |
+| :--- | :--- | :--- | :--- |
+| **TOP-LD (hg38)** | EUR | European | 13,160 |
+| | AFR | African | 1,335 |
+| | SAS | South Asian | 239 |
+| | EAS | East Asian | 844 |
+| **PhenoScanner (Phase 3, hg19 & hg38)** | EUR | European | 503 |
+| | AFR | African | 661 |
+| | SAS | South Asian | 489 |
+| | EAS | East Asian | 504 |
+| | AMR | American | 347 |
+| **HapMap (hg16)** | ASW | African ancestry in Southwest USA | 90 |
+| | CEU | Utah residents with N/W European ancestry | 180 |
+| | CHB | Han Chinese in Beijing, China | 90 |
+| | CHD | Chinese in Metropolitan Denver, Colorado | 100 |
+| | GIH | Gujarati Indians in Houston, Texas | 100 |
+| | JPT | Japanese in Tokyo, Japan | 91 |
+| | LWK | Luhya in Webuye, Kenya | 100 |
+| | MEX | Mexican ancestry in Los Angeles, California | 90 |
+| | MKK | Maasai in Kinyawa, Kenya | 180 |
+| | TSI | Toscans in Italy | 100 |
+| | YRI | Yoruba in Ibadan, Nigeria | 180 |
+| **RAISS (1000G Phase 3, hg38)** | EUR | European | 632 |
+| | AFR | African | 893 |
+| | SAS | South Asian | 601 |
+| | EAS | East Asian | 585 |
+| | AMR | Admixed American | 490 |
+| **UKBB (hg19)** | EUR | European | 362,446 |
+| | AFR | African | 6,255 |
+| | CSA | Central and South Asian | 8,284 |
+| | EAS | East Asian | 2,700 |
+| | AMR | Admixed American | 987 |
+| | MID | Middle Eastern | 1,567 |
+| **LASI-DAD** | IND | Indian | 2,680 |
+| **HGDP** | EUR | European | 155 |
+| | AFR | African | 104 |
+| | CSA | Central South Asian | 197 |
+| | EAS | East Asian | 223 |
+| | AMR | Admixed American | 61 |
+| | MID | Middle Eastern | 161 |
+| | OCN | Oceanian | 28 |
+
 
 ## **Usage**
 
