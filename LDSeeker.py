@@ -1,5 +1,3 @@
-#!/usr/bin/env python
-
 import time
 import os
 import argparse
@@ -10,15 +8,25 @@ start = time.time()
 
 
 def main():
+    print(r"""
+      .---.
+     /     \
+    |       |   _     ____   ____            _
+     \     /   | |   |  _ \ / ___|  ___  ___| | _____ _ __
+      `---'__  | |   | | | |\___ \ / _ \/ _ \ |/ / _ \ '__|
+           \ \ | |___| |_| | ___) |  __/  __/   <  __/ |
+            \ \|_____|____/ |____/ \___|\___|_|\_\___|_|
+             `
+    """)
 
     # Parse arguments
     global imp_snp_list
     imp_snp_list = []
     version = '1.0.0'
     print("---------------------------------------------------------------------------------")
-    print("LDSeeker : Search LD among a set of variants")
-    print("Version " + version + "; December 2025")
-    print("Copyright (C) 2025 Pantelis Bagos")
+    print("LDSeeker : Exploring linkage disequilibrium in GWAS using multiple panels")
+    print("Version " + version + "; February 2026")
+    print("Copyright (C) 2026 Pantelis Bagos")
     print("Freely distributed under the GNU General Public Licence (GPLv3)")
     print("---------------------------------------------------------------------------------")
 
@@ -32,8 +40,8 @@ def main():
         '--ref',
         type=str,
         required=False,
-        help='LD Reference files (Pheno_Scanner, 1000G_hg38, TOP_LD, Hap_Map or all_panels)',
-        default='all_panels'
+        help='LD Reference files. Available reference panels: Pheno_Scanner, 1000G_hg38 (High Coverage, Standard), TOP_LD, Hap_Map, UKBB (UK Biobank), HGDP (Human Genome Diversity Project), LASI-DAD and ChinaMAP',
+        default='1000G_hg38'
     )
     parser.add_argument(
         '--pairwise',
@@ -75,6 +83,23 @@ def main():
         help='Prefix for LD-pruned GWAS output files '
              '(e.g. LD_pruned_kept.txt, LD_pruned_pruned.txt).'
     )
+    parser.add_argument(
+        '--ld-prune-threshold',
+        type=float,
+        required=False,
+        default=None,
+        help='Threshold value to filter SNPs before pruning (e.g. 0.05). '
+             'Rows not meeting the criterion are ignored.'
+    )
+    parser.add_argument(
+        '--ld-prune-mode',
+        type=str,
+        required=False,
+        default='below',
+        choices=['below', 'above'],
+        help='Filter mode relative to threshold: "below" (keep P < threshold) '
+             'or "above" (keep P > threshold).'
+    )
 
     args = parser.parse_args()
 
@@ -91,6 +116,10 @@ def main():
     ld_prune = (ld_prune_flag == 'YES')
     ld_prune_col = args.ld_prune_col
     ld_prune_prefix = args.ld_prune_prefix
+
+    # New arguments for threshold filtering
+    ld_prune_threshold = args.ld_prune_threshold
+    ld_prune_mode = args.ld_prune_mode
 
     if imp_snp_list_path is not None:
         imp_snp_list = list(pd.read_csv(imp_snp_list_path, header=None)[0])
@@ -122,7 +151,9 @@ def main():
             imp_snp_list,
             ld_prune=ld_prune,
             ld_prune_p_col=ld_prune_col,
-            ld_prune_out_prefix=ld_prune_prefix
+            ld_prune_out_prefix=ld_prune_prefix,
+            ld_prune_threshold=ld_prune_threshold,
+            ld_prune_mode=ld_prune_mode
         )
 
 
