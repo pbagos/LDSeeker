@@ -204,8 +204,6 @@ Depending on the mode selected, LDSeeker generates the following TSV files:
 
 ## **License**
 
-Copyright (C) 2026 **Pantelis Bagos**.
-
 Freely distributed under the **GNU General Public Licence (GPLv3)**.
 
 [image1]: <data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAA8AAAAVCAYAAACZm7S3AAABAklEQVR4XmNgoBNglZOT8wXiWdLS0sLokvgAC1BTGZBmBHGA7L9ArI2mBjsQExMTB2mQlZX1A/GB7B1A3ICmDCdgBCouFxIS4gNx5OXllwLxHHRFRAGgxv9AihVdnCAAarwuLi7OjS5OEAgKCvLD/ApiwyXQgx9FEgiAgTUZaGsOlMsM5BeBWUDBB6CgB/kFSE8CxaWMjIwqkH8RiBWBWBIkh4yBaozBmkFBj6wAZDJQ7DWKImwAKOkCVKQJxNFQzdEgcSC9DCh3GF09VgBUeBqo4YCoqCgPuhxBALIVloJIBlD/KaGLEwTAaNKHBhTpAJRugfgKujhRABinnOiJZBgDAEB+OYlaoqoJAAAAAElFTkSuQmCC>
