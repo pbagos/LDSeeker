@@ -56,7 +56,8 @@ LDSeeker is written in Python (ver. 3.10)
     ```
     pip install -r  requirements.txt
     ```
- 
+## Download Reference panels 
+You can download all the LD reference panels in .parquet format from here :  
 ## **Data Configuration**
 
 **⚠️ Important:** LDSeeker\_functions.py expects reference panel data (Parquet files) to be located in specific directories.
