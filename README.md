@@ -127,7 +127,6 @@ The tool expects Parquet files for the following reference panels and population
 Finds all variants in the reference panel that are in LD with your input SNPs.
 ```
 python LDSeeker.py --file-path input_gwas.txt --r2threshold 0.6 --pop EUR --maf 0.01 --ref 1000G_hg38
-
 ```
 ### **2\. Pairwise LD Calculation**
 
@@ -141,7 +140,6 @@ python LDSeeker.py --file-path input_gwas.txt --r2threshold 0.6 --pop EUR --maf 
 Calculates pairwise LD and removes SNPs that are in high LD with a more significant SNP (lower P-value).
 ```
 python LDSeeker.py --file-path input_gwas.txt --r2threshold 0.2 --pop EUR --maf 0.01 --ref UKBB --pairwise YES --ld-prune YES --ld-prune-col P --ld-prune-threshold 5e-8 --ld-prune-mode below
-
 ```
 ## **Arguments**
 
