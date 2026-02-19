@@ -9,7 +9,7 @@
 A web-based version is available at [https://compgen.dib.uth.gr/LDSeeker/](https://compgen.dib.uth.gr/LDSeeker/)
 
 ## Download Reference panels 
-You can download all the LD reference panels in .parquet format from here :  
+You can download all the LD reference panels in .parquet format from [here](http://195.251.108.185/ref/).
 
 ## **Key Capabilities**
 
