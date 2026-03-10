@@ -474,8 +474,21 @@ def hg38_1kg_process_high_coverage_pairwise(rs_series, r2threshold, population, 
 
 
 def HGDP_LD_info_pairwise(rs_series, R2_threshold, population, maf_threshold, chrom, imp_snp_list, ld_prune=False):
-    print(f"Building query plan: HGDP files ({population}) chr{chrom}...")
-    ld_file = f'D:/ref/HGDP/LD_{population}_r_phased/{population}_chr{chrom}_r_phased.vcor.parquet'
+    pop_map = {
+        "EUR": "EUROPE",
+        "EAS": "EAST_ASIA",
+        "AFR": "AFRICA",
+        "AMR": "AMERICA",
+        "SAS": "CENTRAL_SOUTH_ASIA",
+        "MID": "MIDDLE_EAST",
+        "OCE": "OCEANIA"
+    }
+    
+    # Safely convert to uppercase if input is abbreviation, otherwise fall back to string as-is
+    hgdp_pop = pop_map.get(str(population).upper(), population)
+    
+    print(f"Building query plan: HGDP files ({hgdp_pop}) chr{chrom}...")
+    ld_file = f'D:/ref/HGDP/LD_{hgdp_pop}_r_phased/{hgdp_pop}_chr{chrom}_r_phased.vcor.parquet'
     return _generic_vcor_pairwise(rs_series, R2_threshold, maf_threshold, ld_file, imp_snp_list, ld_prune,
                                   is_phased=True)
 
@@ -735,14 +748,13 @@ def process_data_pairwise(
 
         if not ld_prune:
             tmp_files = []
-
+            
             for i in range(0, len(chroms), batch_size):
                 batch_chroms = chroms[i:i + batch_size]
                 lazy_results_list = []
 
                 for chrom in batch_chroms:
-                    lazy_data = proc_fn(rs_series, r2threshold, population, maf_input, chrom, imp_snp_list,
-                                        ld_prune=False)
+                    lazy_data = proc_fn(rs_series, r2threshold, population, maf_input, chrom, imp_snp_list, ld_prune=False)
                     if lazy_data is not None:
                         lazy_results_list.append(lazy_data)
                         print(f"Evaluation graph for chr{chrom} constructed.")
@@ -780,8 +792,7 @@ def process_data_pairwise(
                 kept_lazy_list = []
 
                 for chrom in batch_chroms:
-                    lazy_data = proc_fn(rs_series, r2threshold, population, maf_input, chrom, imp_snp_list,
-                                        ld_prune=True)
+                    lazy_data = proc_fn(rs_series, r2threshold, population, maf_input, chrom, imp_snp_list, ld_prune=True)
                     if lazy_data is None:
                         continue
 
@@ -795,8 +806,7 @@ def process_data_pairwise(
                         )
                     else:
                         if i == 0:
-                            print(
-                                f"WARNING: 'CHR' column missing in GWAS data. Pruning against chr{chrom} LD will output ALL chromosomes in this file!")
+                            print(f"WARNING: 'CHR' column missing in GWAS data. Pruning against chr{chrom} LD will output ALL chromosomes in this file!")
                         chr_study_lazy = study_lazy
 
                     kept_gwas_lazy = ld_prune_pairs(
