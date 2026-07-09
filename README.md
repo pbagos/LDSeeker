@@ -141,23 +141,50 @@ Calculates pairwise LD and removes SNPs that are in high LD.
 ```
 python LDSeeker.py --file-path input_gwas.txt --r2threshold 0.2 --pop EUR --maf 0.01 --ref UKBB --pairwise YES --ld-prune YES --ld-prune-col P --ld-prune-threshold 5e-8 --ld-prune-mode below
 ```
-## **Arguments**
+## Arguments
 
-| Argument | Required | Default | Description |
-| :---- | :---- | :---- | :---- |
-| \--file-path | **Yes** | \- | Path to input GWAS summary statistics (Tab-separated). |
-| \--r2threshold | **Yes** | \- | Minimum ![][image1] value (0.0 \- 1.0). |
-| \--pop | **Yes** | \- | Population code (e.g., EUR, AMR, AFR, EAS, SAS). |
-| \--maf | **Yes** | \- | Minor Allele Frequency threshold (e.g., 0.01). |
-| \--ref | No | 1000G\_hg38 | Reference panel (e.g., UKBB, HGDP, LASI_DAD, TOP\_LD, Hap_Map, 1000G\_hg38\_high\_cov,1000G\_hg38). |
-| \--pairwise | No | NO | Calculate pairwise LD between input SNPs (YES or NO). |
-| \--imp\_list | No | \- | Path to a file containing a specific list of SNPs to impute/filter (no header). |
-| \--ld-prune | No | NO | Apply LD pruning? (Requires \--pairwise YES). |
-| \--ld-prune-col | No | P | Column name to use for ranking SNPs (usually P-value). |
-| \--ld-prune-prefix | No | LD\_pruned | Prefix for pruning output files. |
-| \--ld-prune-threshold | No | None | Filter input SNPs by this value before pruning (e.g., 0.05). |
-| \--ld-prune-mode | No | below | Keep rows below or above the prune threshold. |
+### Core
 
+| Argument | Required | Default | Choices | Description |
+| :-- | :-- | :-- | :-- | :-- |
+| `--file-path` | **Yes** | — | — | Path to input GWAS summary statistics (tab-separated). |
+| `--r2threshold` | **Yes** | — | — | Minimum r² value (0.0–1.0). |
+| `--pop` | **Yes** | — | — | Population code (e.g. EUR, AMR, AFR, EAS, SAS). |
+| `--maf` | **Yes** | — | — | Minor Allele Frequency threshold (e.g. 0.01). |
+| `--ref` | No | `1000G_hg38` | — | Reference panel: `1000G_hg38`, `1000G_hg38_high_cov`, `TOP_LD`, `Hap_Map`, `Pheno_Scanner`, `UKBB`, `HGDP`, `LASI_DAD`. |
+| `--pairwise` | No | `NO` | — | Return only pairwise LD among input SNPs (`YES`/`NO`). |
+| `--imp_list` | No | — | — | File of SNPs to impute/add as targets (one per line, no header). |
+
+## LD pruning (only active with `--pairwise YES --ld-prune YES`)
+
+| Argument | Required | Default | Choices | Description |
+| :-- | :-- | :-- | :-- | :-- |
+| `--ld-prune` | No | `NO` | — | Apply pairwise-LD pruning (`YES`/`NO`). |
+| `--ld-prune-metric` | No | `P` | `P`, `Z` | Rank SNPs by lowest P (`P`) or highest \|Z\| (`Z`). |
+| `--ld-prune-prefix` | No | `LD_pruned` | — | Prefix for pruned output (e.g. `LD_pruned_kept.txt`). |
+| `--ld-prune-p-col` | No | `P` | — | Column name for P-values. |
+| `--ld-prune-p-threshold` | No | `None` | — | Pre-filter by P before pruning (e.g. 5e-8); rows failing it are dropped. |
+| `--ld-prune-p-threshold-mode` | No | `below` | `below`, `above` | Keep P `below` or `above` the threshold. |
+| `--ld-prune-z-col` | No | `Z` | — | Column name for Z-values. |
+| `--ld-prune-z-threshold` | No | `1.96` | — | Pre-filter by \|Z\| before pruning; rows with \|Z\| ≤ threshold dropped. |
+
+## Significance filtering of input variants (applies to both standard and `--pairwise YES` runs)
+
+| Argument | Required | Default | Choices | Description |
+| :-- | :-- | :-- | :-- | :-- |
+| `--significance` | No | — (off) | `significant`, `nonsignificant` | Keep only significant or only non-significant variants before LD retrieval. Omit to disable. |
+| `--significance-metric` | No | `P` | `P`, `Z` | Define significance by two-tailed p from z (`P`) or directly by \|z\| (`Z`). |
+| `--significance-threshold` | No | `5e-08` | — | p-value cutoff (metric `P`) or \|z\| cutoff (metric `Z`). |
+| `--beta-col` | No | `BETA` | — | Effect-size column, for deriving z = BETA/SE when no Z column. |
+| `--se-col` | No | `SE` | — | Standard-error column, for deriving z = BETA/SE. |
+| `--sig-z-col` | No | `Z` | — | Precomputed z column (preferred over BETA/SE) for significance. |
+| `--sig-p-col` | No | `P` | — | Precomputed p column, fallback when neither Z nor BETA/SE exists. |
+
+## Notes
+
+- `--pairwise`, `--ld-prune`, and `--imp_list` are not restricted by argparse `choices`. The YES/NO flags are tested as `== 'NO'` / `== 'YES'` after uppercasing, so `--pairwise MAYBE` is treated as pairwise mode (anything ≠ `NO`) and `--ld-prune TRUE` is treated as NO (anything ≠ `YES`). Add `choices=['YES','NO']` to enforce.
+- `--ref` is not validated by argparse; an unsupported panel errors at runtime with `Unsupported ref_panel`.
+- Metric `P` and metric `Z` are interchangeable at matched thresholds, since two-tailed p < α ⟺ \|z\| > Φ⁻¹(1 − α/2). For example `--significance-metric Z --significance-threshold 5.4513` selects the same variants as `--significance-metric P --significance-threshold 5e-8`.
 ## **Input File Format**
 
 The input file (--file-path) must be a **tab-separated** text file.
