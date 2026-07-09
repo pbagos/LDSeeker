@@ -8,7 +8,7 @@
 
 A web-based version is available at [https://compgen.dib.uth.gr/LDSeeker/](https://compgen.dib.uth.gr/LDSeeker/)
 
-## Download Reference panels and resources
+## **Download Reference panels and resources**
  
 | Resource | Web address |
 | :--- | :--- |
