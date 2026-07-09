@@ -313,8 +313,8 @@ def TOP_LD_info_pairwise(rs_series, chrom, population, maf_threshold, R2_thresho
 
     snp_series = _get_snp_series(rs_series, imp_snp_list)
 
-    maf_path = f"D:/ref/TOP_LD/{population}/SNV/{population}_chr{chrom}_no_filter_0.2_1000000_info_annotation.parquet"
-    ld_path = f"D:/ref/TOP_LD/{population}/SNV/{population}_chr{chrom}_no_filter_0.2_1000000_LD.parquet"
+    maf_path = f"ref/TOP_LD/{population}/SNV/{population}_chr{chrom}_no_filter_0.2_1000000_info_annotation.parquet"
+    ld_path = f"ref/TOP_LD/{population}/SNV/{population}_chr{chrom}_no_filter_0.2_1000000_LD.parquet"
 
     if ld_prune:
         maf_lazy = pl.scan_parquet(maf_path).select(["Uniq_ID", "rsID"])
@@ -376,8 +376,8 @@ def Hap_Map_LD_info_dask_pairwise(rs_series, chrom, population, maf_threshold, R
     print(f"Building query plan: Hap Map files ({population}) chr{chrom}...")
     snp_series = _get_snp_series(rs_series, imp_snp_list)
 
-    maf_file = f'D:/ref/Hap_Map/allele_freqs_chr{chrom}_{population}_phase3.2_nr.b36_fwd.parquet'
-    ld_file = f'D:/ref/Hap_Map/ld_chr{chrom}_{population}.parquet'
+    maf_file = f'ref/Hap_Map/allele_freqs_chr{chrom}_{population}_phase3.2_nr.b36_fwd.parquet'
+    ld_file = f'ref/Hap_Map/ld_chr{chrom}_{population}.parquet'
 
     ld_raw = pl.scan_parquet(ld_file)
     cols = ld_raw.collect_schema().names()
@@ -448,8 +448,8 @@ def pheno_Scanner_LD_info_dask_pairwise(rs_series, chrom, population, maf_thresh
     print(f"Building query plan: Pheno Scanner files chr{chrom}...")
     snp_series = _get_snp_series(rs_series, imp_snp_list)
 
-    maf_file = "D:/ref/Pheno_Scanner/1000G.parquet"
-    ld_file = f"D:/ref/Pheno_Scanner/1000G_{population}/1000G_{population}_chr{chrom}.parquet"
+    maf_file = "ref/Pheno_Scanner/1000G.parquet"
+    ld_file = f"ref/Pheno_Scanner/1000G_{population}/1000G_{population}_chr{chrom}.parquet"
     pop_map = {"EUR": "eur", "EAS": "eas", "AFR": "afr", "AMR": "amr", "SAS": "sas"}
     maf_pop = pop_map.get(population)
 
@@ -519,8 +519,8 @@ def hg38_1kg_LD_info_pairwise(rs_series, chrom, population, maf_threshold, R2_th
     print(f"Building query plan: 1000 Genomes Project (hg38) files ({population}) chr{chrom}...")
     snp_series = _get_snp_series(rs_series, imp_snp_list)
 
-    maf_file = f'D:/ref/1000G_hg38/1000G_{population}_0_01.parquet'
-    ld_file = f'D:/ref/1000G_hg38/{population}/chr{chrom}_merged.parquet'
+    maf_file = f'ref/1000G_hg38/1000G_{population}_0_01.parquet'
+    ld_file = f'ref/1000G_hg38/{population}/chr{chrom}_merged.parquet'
 
     ld_lazy = pl.scan_parquet(ld_file)
 
@@ -614,7 +614,7 @@ def _generic_vcor_pairwise(rs_series, R2_threshold, maf_threshold, ld_file, imp_
 def hg38_1kg_LD_info_high_coverage_pairwise(rs_series, R2_threshold, population, maf_threshold, chrom, imp_snp_list,
                                             ld_prune=False, pairwise: bool = True):
     print(f"Building query plan: 1KGP high-cov files ({population}) chr{chrom}...")
-    ld_file = f'D:/ref/1KGP_high_coverage/LD_{population}_r_unphased/{population}_chr{chrom}_r_unphased.vcor.parquet'
+    ld_file = f'ref/1KGP_high_coverage/LD_{population}_r_unphased/{population}_chr{chrom}_r_unphased.vcor.parquet'
     return _generic_vcor_pairwise(rs_series, R2_threshold, maf_threshold, ld_file, imp_snp_list, ld_prune,
                                   is_phased=False, pairwise=pairwise)
 
@@ -641,7 +641,7 @@ def HGDP_LD_info_pairwise(rs_series, R2_threshold, population, maf_threshold, ch
     hgdp_pop = pop_map.get(str(population).upper(), population)
 
     print(f"Building query plan: HGDP files ({hgdp_pop}) chr{chrom}...")
-    ld_file = f'D:/ref/HGDP/LD_{hgdp_pop}_r_phased/{hgdp_pop}_chr{chrom}_r_phased.vcor.parquet'
+    ld_file = f'ref/HGDP/LD_{hgdp_pop}_r_phased/{hgdp_pop}_chr{chrom}_r_phased.vcor.parquet'
     return _generic_vcor_pairwise(rs_series, R2_threshold, maf_threshold, ld_file, imp_snp_list, ld_prune,
                                   is_phased=True, pairwise=pairwise)
 
@@ -654,7 +654,7 @@ def UKBB_LD_info_pairwise(rs_series, R2_threshold, population, maf_threshold, ch
                           pairwise: bool = True):
     print(f"Building query plan: UK Biobank ({population}) chr{chrom}...")
     snp_series = _get_snp_series(rs_series, imp_snp_list)
-    ld_file = f'D:/ref/UKBB/{population}/chr_{chrom}_ld.parquet'
+    ld_file = f'ref/UKBB/{population}/chr_{chrom}_ld.parquet'
     ld_lazy = pl.scan_parquet(ld_file)
 
     if ld_prune:
@@ -704,7 +704,7 @@ def LASI_DAD_LD_info_pairwise(rs_series, R2_threshold, population, maf_threshold
     # LASI-DAD is a single-population (South Asian) panel, so `population` is
     # accepted for interface compatibility but not used to build the path.
     # >>> Adjust this path/pattern to match your actual layout. <
-    ld_file = f'D:/ref/LASI_DAD/chr{chrom}_ld_with_rsids.parquet'
+    ld_file = f'ref/LASI_DAD/chr{chrom}_ld_with_rsids.parquet'
 
     ld_lazy = pl.scan_parquet(ld_file)
 
