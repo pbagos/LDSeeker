@@ -144,7 +144,7 @@ python LDSeeker.py --file-path input_gwas.txt --r2threshold 0.6 --pop EUR --maf 
 
 Calculates pairwise LD and removes SNPs that are in high LD.
 ```
-python LDSeeker.py --file-path input_gwas.txt --r2threshold 0.2 --pop EUR --maf 0.01 --ref UKBB --pairwise YES --ld-prune YES --ld-prune-col P --ld-prune-threshold 5e-8 --ld-prune-mode below
+python LDSeeker.py --file-path input_gwas.txt --r2threshold 0.2 --pop EUR --maf 0.01 --ref UKBB --pairwise YES --ld-prune YES 
 ```
 ## Arguments
 
