@@ -23,7 +23,7 @@ A web-based version is available at [https://compgen.dib.uth.gr/LDSeeker/](https
 | HGDP LD reference panel | http://195.251.108.185/HGDP/ |
 | SNP to Gene mapping reference | https://zenodo.org/records/20161132 |
 
-**NOTE: The Pheno Scanner LD reference panel is available upon request from the Pheno Scanner database (http://www.phenoscanner.medschl.cam.ac.uk)
+**NOTE: The PhenoScanner LD reference panel is available upon request from the PhenoScanner database (http://www.phenoscanner.medschl.cam.ac.uk)
 ## **Key Capabilities**
 
 1. **LD Annotation:** Identify LD partners for input SNPs within a reference panel.  
