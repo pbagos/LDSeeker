@@ -2,10 +2,12 @@
 import os
 import re
 import gc
+import math
 import shutil
 import polars as pl
 import numpy as np
 from numba import njit
+from statistics import NormalDist
 
 pl.Config.set_engine_affinity("streaming")
 
@@ -19,6 +21,112 @@ def _get_snp_series(rs_series: pl.Series, imp_snp_list: list | None) -> pl.Serie
         imp_series = pl.Series(imp_snp_list, dtype=rs_series.dtype).drop_nulls()
         return pl.concat([rs_series, imp_series]).unique(maintain_order=False)
     return rs_series.unique(maintain_order=False)
+
+
+# -------------------------------------------------------------------
+# Significance filtering of the INPUT variants (Wald z = BETA/SE,
+# two-tailed p from z). Lets the user keep either the significant or
+# the non-significant variants of the study file before LD retrieval.
+# -------------------------------------------------------------------
+_STD_NORM = NormalDist(0.0, 1.0)
+
+
+def two_tailed_p_from_z(z: float) -> float:
+    """
+    Two-tailed Wald p-value from a z-score, numerically stable in the tail.
+
+        p = 2 * (1 - Phi(|z|)) = erfc(|z| / sqrt(2))
+
+    Using erfc avoids the catastrophic underflow of ``1 - Phi(|z|)`` (which
+    rounds to 0 for |z| beyond ~8 in float64); erfc stays accurate down to
+    ~1e-300. Scalar utility for annotating variants, not used in the hot loop.
+    """
+    if z is None or (isinstance(z, float) and math.isnan(z)):
+        return float("nan")
+    return math.erfc(abs(z) / math.sqrt(2.0))
+
+
+def z_critical_from_p(p_threshold: float) -> float:
+    """
+    Two-tailed critical |z| for a p-value threshold:  z_c = Phi^{-1}(1 - p/2).
+
+    Filtering ``two-tailed p < alpha`` is *exactly* equivalent to ``|z| > z_c``.
+    We convert the threshold once (scalar, via the stdlib inverse-normal) and
+    then filter |z| natively in Polars, which is both faster and free of any
+    tail underflow that per-row p-value computation would suffer.
+    """
+    if not (0.0 < p_threshold < 1.0):
+        raise ValueError("p_threshold must be in the open interval (0, 1).")
+    return _STD_NORM.inv_cdf(1.0 - p_threshold / 2.0)
+
+
+def _z_expr(cols, z_col: str = "Z", beta_col: str = "BETA", se_col: str = "SE"):
+    """
+    Polars expression for the Wald z-score, or None if the columns are absent.
+    Priority: an explicit Z column, otherwise BETA / SE. SE <= 0 (or non-finite)
+    yields a null z so the variant is treated as undecidable rather than dividing
+    by zero.
+    """
+    if z_col and z_col in cols:
+        return pl.col(z_col).cast(pl.Float64)
+    if beta_col in cols and se_col in cols:
+        se = pl.col(se_col).cast(pl.Float64)
+        return (
+            pl.when(se > 0.0)
+            .then(pl.col(beta_col).cast(pl.Float64) / se)
+            .otherwise(None)
+        )
+    return None
+
+
+def _significance_filter_expr(cols, keep: str, metric: str = "P", threshold: float = 5e-8,
+                              z_col: str = "Z", beta_col: str = "BETA", se_col: str = "SE",
+                              p_col: str = "P"):
+    """
+    Build a boolean Polars expression selecting the rows to KEEP.
+
+        keep      : "significant"  -> keep associated variants
+                    "nonsignificant" -> keep the complement
+        metric    : "P" -> two-tailed p derived from z (z = Z col, else BETA/SE)
+                    "Z" -> filter directly on |z| = |BETA/SE|
+        threshold : p-value cutoff (metric "P") or |z| cutoff (metric "Z")
+
+    Returns (expr, description). expr is None (with a reason in description) when
+    the required columns are missing, so the caller can skip filtering gracefully.
+    Variants with a null/undecidable z (or null P in the fallback) are excluded
+    from the kept set under BOTH keep-directions.
+    """
+    keep = keep.lower()
+    if keep not in ("significant", "nonsignificant"):
+        raise ValueError("keep must be 'significant' or 'nonsignificant'.")
+    metric = metric.upper()
+
+    z = _z_expr(cols, z_col, beta_col, se_col)
+
+    if metric == "Z":
+        if z is None:
+            return None, "Z filtering needs a 'Z' column or both 'BETA' and 'SE'."
+        zc = float(threshold)
+        sig = z.abs() > pl.lit(zc, dtype=pl.Float64)
+        desc = f"|z| > {zc:g}"
+    elif metric == "P":
+        if z is not None:
+            zc = z_critical_from_p(float(threshold))
+            sig = z.abs() > pl.lit(zc, dtype=pl.Float64)   # p < alpha  <=>  |z| > z_c
+            desc = f"two-tailed p < {threshold:g}  (|z| > {zc:.4f})"
+        elif p_col in cols:
+            sig = pl.col(p_col).cast(pl.Float64) < pl.lit(float(threshold), dtype=pl.Float64)
+            desc = f"{p_col} < {threshold:g}"
+        else:
+            return None, "P filtering needs 'Z' or 'BETA'/'SE' (to derive p), or a 'P' column."
+    else:
+        raise ValueError("metric must be 'P' or 'Z'.")
+
+    keep_expr = sig if keep == "significant" else ~sig
+    # Null predicate -> row dropped by .filter(); make the intent explicit so an
+    # undecidable variant is never silently retained as "non-significant".
+    keep_expr = keep_expr & sig.is_not_null()
+    return keep_expr, desc
 
 
 def _semi_join_filter(lazy_df: pl.LazyFrame, col_name: str, series_to_match: pl.Series) -> pl.LazyFrame:
@@ -92,39 +200,62 @@ def ld_prune_pairs(
         ld_pairs_lazy: pl.LazyFrame,
         snp_col: str = "SNP",
         p_col: str | None = "P",
+        p_threshold: float | None = None,
+        p_threshold_mode: str = "below",
+        z_col: str | None = "Z",
+        z_threshold: float | None = 2.0,
+        prune_metric: str = "P",  # Can be "P" or "Z" to dictate which SNP to prioritize
         snp1_col: str = "SNP1",
-        snp2_col: str = "SNP2",
-        threshold: float | None = None,
-        threshold_mode: str = "below"
+        snp2_col: str = "SNP2"
 ) -> pl.LazyFrame:
     """
     Massively optimized Polars + Numba LD pruning.
-    Now accepts a LazyFrame for ld_pairs_lazy to prevent memory crashes.
+    Supports filtering and sorting by both P-values and Z-values.
     """
     active_lazy = study_lazy
     study_cols = active_lazy.collect_schema().names()
 
     # 1) Pre-filter based on P-value threshold if provided
-    if (threshold is not None) and (p_col is not None) and (p_col in study_cols):
-        thresh_expr = pl.lit(threshold, dtype=pl.Float32)
+    if (p_threshold is not None) and (p_col is not None) and (p_col in study_cols):
         p_expr = pl.col(p_col).cast(pl.Float32)
-        if threshold_mode == "above":
-            active_lazy = active_lazy.filter(p_expr > thresh_expr)
+        if p_threshold_mode == "above":
+            active_lazy = active_lazy.filter(p_expr > pl.lit(p_threshold, dtype=pl.Float32))
         else:
-            active_lazy = active_lazy.filter(p_expr < thresh_expr)
+            active_lazy = active_lazy.filter(p_expr < pl.lit(p_threshold, dtype=pl.Float32))
 
-    # 2) Extract ordered SNPs map it to Int32 IDs natively
-    sort_exprs = []
-    if (p_col is not None) and (p_col in study_cols):
-        sort_exprs.append(p_col)
+    # 2) Pre-filter based on Z-value threshold if provided
+    if (z_threshold is not None) and (z_col is not None) and (z_col in study_cols):
+        # We take the absolute value of Z, expecting it to be > threshold (e.g. > 2.0)
+        z_expr = pl.col(z_col).cast(pl.Float32).abs()
+        active_lazy = active_lazy.filter(z_expr > pl.lit(z_threshold, dtype=pl.Float32))
 
-    # Use streaming=True to ensure out-of-core chunk processing for massive sorting
-    ordered_snps_df = (
-        active_lazy.select([snp_col, p_col] if sort_exprs else [snp_col])
+    # 3) Setup sorting expression so the "most significant" SNPs are processed first by Numba
+    sort_expr = None
+    sort_desc = False
+
+    if prune_metric.upper() == "P" and (p_col is not None) and (p_col in study_cols):
+        sort_expr = pl.col(p_col).cast(pl.Float32)
+        sort_desc = (p_threshold_mode == "above")
+    elif prune_metric.upper() == "Z" and (z_col is not None) and (z_col in study_cols):
+        sort_expr = pl.col(z_col).cast(pl.Float32).abs()
+        sort_desc = True  # We want largest Z-values first
+
+    # 4) Extract ordered SNPs natively
+    select_cols = [snp_col]
+    if (p_col is not None) and (p_col in study_cols): select_cols.append(p_col)
+    if (z_col is not None) and (z_col in study_cols): select_cols.append(z_col)
+
+    ordered_snps_lazy = (
+        active_lazy.select(select_cols)
         .drop_nulls(subset=[snp_col])
         .unique(subset=[snp_col], maintain_order=False)
-        .sort(sort_exprs, descending=False) if sort_exprs else active_lazy.select(snp_col).unique()
-    ).collect(streaming=True)
+    )
+
+    # Use streaming=True to ensure out-of-core chunk processing for massive sorting
+    if sort_expr is not None:
+        ordered_snps_df = ordered_snps_lazy.sort(sort_expr, descending=sort_desc).collect(streaming=True)
+    else:
+        ordered_snps_df = ordered_snps_lazy.collect(streaming=True)
 
     # Add 0 to N-1 integer IDs mapping to feed Numba natively
     n_snps = len(ordered_snps_df)
@@ -132,9 +263,8 @@ def ld_prune_pairs(
         pl.int_range(0, n_snps, dtype=pl.Int32).alias("_numba_id")
     )
 
-    # 3) Memory-Safe Graph Construction:
+    # 5) Memory-Safe Graph Construction:
     # Drops the massive String columns and R2 values at the Rust layer.
-    # We only materialize `u` and `v` Integer Arrays!
     ld_mapped = (
         ld_pairs_lazy
         .select([snp1_col, snp2_col])
@@ -159,7 +289,7 @@ def ld_prune_pairs(
     if ld_mapped.is_empty():
         return active_lazy
 
-    # 4) Run extreme speed graph algorithm in C via Numba
+    # 6) Run extreme speed graph algorithm in C via Numba
     edges_u = ld_mapped["u"].to_numpy()
     edges_v = ld_mapped["v"].to_numpy()
 
@@ -168,7 +298,7 @@ def ld_prune_pairs(
     # Aggressively return internal array memory to OS before continuing
     del ld_mapped, edges_u, edges_v
 
-    # 5) Filter by the boolean array and return Semi-Join AST node
+    # 7) Filter by the boolean array and return Semi-Join AST node
     kept_snps = ordered_snps_df.filter(pl.Series(keep_mask))[snp_col]
     return _semi_join_filter(active_lazy, snp_col, kept_snps)
 
@@ -177,7 +307,8 @@ def ld_prune_pairs(
 # TOP-LD (pairwise)
 # -------------------------------------------------------------------
 
-def TOP_LD_info_pairwise(rs_series, chrom, population, maf_threshold, R2_threshold, imp_snp_list=None, ld_prune=False):
+def TOP_LD_info_pairwise(rs_series, chrom, population, maf_threshold, R2_threshold, imp_snp_list=None, ld_prune=False,
+                         pairwise: bool = True):
     print(f"Building query plan: TOP-LD files for {population} chr{chrom}...")
 
     snp_series = _get_snp_series(rs_series, imp_snp_list)
@@ -203,9 +334,15 @@ def TOP_LD_info_pairwise(rs_series, chrom, population, maf_threshold, R2_thresho
         .filter(pl.col("MAF").cast(pl.Float32) >= pl.lit(maf_threshold, dtype=pl.Float32))
     )
 
-    maf_lazy = _semi_join_filter(maf_lazy, "rsID", snp_series)
+    # Anchor (SNP1) is always the inserted rsIDs. The target (SNP2) is restricted
+    # to the inserted set only in pairwise mode; in global mode it spans the whole
+    # (MAF-filtered) panel so every LD partner of each inserted SNP is returned.
+    if pairwise:
+        maf_target = _semi_join_filter(maf_lazy, "rsID", snp_series)
+    else:
+        maf_target = maf_lazy
     valid_ids1 = _semi_join_filter(maf_lazy, "rsID", rs_series).select("Uniq_ID")
-    valid_ids2 = maf_lazy.select("Uniq_ID")
+    valid_ids2 = maf_target.select("Uniq_ID")
 
     ld_lazy = pl.scan_parquet(ld_path)
     if R2_threshold is not None:
@@ -235,7 +372,7 @@ def TOP_LD_process_pairwise(rs_series, r2threshold, population, maf_input, chrom
 # -------------------------------------------------------------------
 
 def Hap_Map_LD_info_dask_pairwise(rs_series, chrom, population, maf_threshold, R2_threshold, imp_snp_list,
-                                  ld_prune=False):
+                                  ld_prune=False, pairwise: bool = True):
     print(f"Building query plan: Hap Map files ({population}) chr{chrom}...")
     snp_series = _get_snp_series(rs_series, imp_snp_list)
 
@@ -262,11 +399,15 @@ def Hap_Map_LD_info_dask_pairwise(rs_series, chrom, population, maf_threshold, R
         .with_columns(pl.col("MAF").cast(pl.Float32))
         .filter(pl.col("MAF") >= pl.lit(maf_threshold, dtype=pl.Float32))
     )
-    maf_df = _semi_join_filter(maf_df, "rsID", snp_series)
+    # In pairwise mode restrict the MAF table to the inserted set; in global mode
+    # keep the whole (MAF-filtered) panel so any SNP2 partner can be annotated.
+    if pairwise:
+        maf_df = _semi_join_filter(maf_df, "rsID", snp_series)
 
     ld_df = ld_raw.filter(pl.col(cols[3]) != pl.col(cols[4]))
-    ld_df = _semi_join_filter(ld_df, cols[3], rs_series)
-    ld_df = _semi_join_filter(ld_df, cols[4], snp_series)
+    ld_df = _semi_join_filter(ld_df, cols[3], rs_series)          # SNP1 anchor: inserted rsIDs
+    if pairwise:
+        ld_df = _semi_join_filter(ld_df, cols[4], snp_series)     # SNP2: inserted set only (pairwise)
 
     if R2_threshold is not None:
         ld_df = ld_df.filter(pl.col(cols[6]).cast(pl.Float32) >= pl.lit(R2_threshold, dtype=pl.Float32))
@@ -299,9 +440,9 @@ def Hap_Map_process_pairwise(rs_series, r2threshold, population, maf_input, chro
 # -------------------------------------------------------------------
 
 def pheno_Scanner_LD_info_dask_pairwise(rs_series, chrom, population, maf_threshold, R2_threshold, imp_snp_list,
-                                        ld_prune=False):
+                                        ld_prune=False, pairwise: bool = True):
     if R2_threshold is not None and R2_threshold < 0.8:
-        print("Pheno Scanner includes data with R2 ≥ 0.8. Setting R2_threshold = 0.8")
+        print("Pheno Scanner includes data with R2 >= 0.8. Setting R2_threshold = 0.8")
         R2_threshold = 0.8
 
     print(f"Building query plan: Pheno Scanner files chr{chrom}...")
@@ -330,7 +471,9 @@ def pheno_Scanner_LD_info_dask_pairwise(rs_series, chrom, population, maf_thresh
         .filter(pl.col(maf_pop) >= pl.lit(maf_threshold, dtype=pl.Float32))
     )
 
-    maf2_lazy = _semi_join_filter(maf1_lazy, "rsid", snp_series).rename({
+    # SNP2 annotation: restrict to inserted set in pairwise mode, whole panel in global.
+    maf2_base = _semi_join_filter(maf1_lazy, "rsid", snp_series) if pairwise else maf1_lazy
+    maf2_lazy = maf2_base.rename({
         "hg19_coordinates": "pos2(hg19)", maf_pop: "MAF2", "a1": "ALT2", "a2": "REF2"
     }).select(["pos2(hg19)", "rsid", "MAF2", "ALT2", "REF2"])
 
@@ -340,8 +483,9 @@ def pheno_Scanner_LD_info_dask_pairwise(rs_series, chrom, population, maf_thresh
 
     ld_lazy = pl.scan_parquet(ld_file).select(["ref_hg19_coordinates", "ref_rsid", "rsid", "r2", "r", "dprime"]).filter(
         pl.col("ref_rsid") != pl.col("rsid"))
-    ld_lazy = _semi_join_filter(ld_lazy, "ref_rsid", rs_series)
-    ld_lazy = _semi_join_filter(ld_lazy, "rsid", snp_series)
+    ld_lazy = _semi_join_filter(ld_lazy, "ref_rsid", rs_series)   # SNP1 anchor
+    if pairwise:
+        ld_lazy = _semi_join_filter(ld_lazy, "rsid", snp_series)  # SNP2: pairwise only
 
     if R2_threshold is not None:
         ld_lazy = ld_lazy.filter(pl.col("r2").cast(pl.Float32) >= pl.lit(R2_threshold, dtype=pl.Float32))
@@ -370,7 +514,8 @@ def pheno_Scanner_process_pairwise(rs_series, r2threshold, population, maf_input
 # 1000G hg38 (pairwise)
 # -------------------------------------------------------------------
 
-def hg38_1kg_LD_info_pairwise(rs_series, chrom, population, maf_threshold, R2_threshold, imp_snp_list, ld_prune=False):
+def hg38_1kg_LD_info_pairwise(rs_series, chrom, population, maf_threshold, R2_threshold, imp_snp_list, ld_prune=False,
+                              pairwise: bool = True):
     print(f"Building query plan: 1000 Genomes Project (hg38) files ({population}) chr{chrom}...")
     snp_series = _get_snp_series(rs_series, imp_snp_list)
 
@@ -393,14 +538,19 @@ def hg38_1kg_LD_info_pairwise(rs_series, chrom, population, maf_threshold, R2_th
     tmp = pl.scan_parquet(maf_file)
     cols = tmp.collect_schema().names()
     maf_lazy = tmp.rename({old: new for old, new in zip(cols[:6], ['CHR', 'SNP', 'MAF', 'POS', 'REF', 'ALT'])})
-    maf_lazy = _semi_join_filter(maf_lazy, "SNP", snp_series).with_columns(pl.col("MAF").cast(pl.Float32))
+    maf_lazy = maf_lazy.with_columns(pl.col("MAF").cast(pl.Float32))
+    # Restrict the MAF table to the inserted set only in pairwise mode; global mode
+    # keeps the whole (MAF-filtered) panel so any SNP_B partner can be annotated.
+    if pairwise:
+        maf_lazy = _semi_join_filter(maf_lazy, "SNP", snp_series)
 
     if maf_threshold is not None:
         maf_lazy = maf_lazy.filter(pl.col("MAF") >= pl.lit(maf_threshold, dtype=pl.Float32))
 
     ld_lazy = ld_lazy.select(["CHR_A", "SNP_A", "CHR_B", "SNP_B", "R"])
-    ld_lazy = _semi_join_filter(ld_lazy, "SNP_A", rs_series)
-    ld_lazy = _semi_join_filter(ld_lazy, "SNP_B", snp_series)
+    ld_lazy = _semi_join_filter(ld_lazy, "SNP_A", rs_series)          # SNP_A anchor
+    if pairwise:
+        ld_lazy = _semi_join_filter(ld_lazy, "SNP_B", snp_series)     # SNP_B: pairwise only
     ld_lazy = ld_lazy.with_columns(pl.col("R").cast(pl.Float32).pow(2).alias("R2"))
 
     if R2_threshold is not None:
@@ -419,7 +569,8 @@ def hg38_1kg_process_pairwise(rs_series, r2threshold, population, maf_input, chr
     return hg38_1kg_LD_info_pairwise(rs_series, chromosome, population, maf_input, r2threshold, imp_snp_list, ld_prune)
 
 
-def _generic_vcor_pairwise(rs_series, R2_threshold, maf_threshold, ld_file, imp_snp_list, ld_prune, is_phased=False):
+def _generic_vcor_pairwise(rs_series, R2_threshold, maf_threshold, ld_file, imp_snp_list, ld_prune, is_phased=False,
+                           pairwise: bool = True):
     """Shared fast logic for HGDP and 1KGP high coverage using new fast semi joins."""
     snp_series = _get_snp_series(rs_series, imp_snp_list)
     ld_lazy = pl.scan_parquet(ld_file)
@@ -437,8 +588,9 @@ def _generic_vcor_pairwise(rs_series, R2_threshold, maf_threshold, ld_file, imp_
         return ld_lazy
 
     cols = ld_lazy.collect_schema().names()
-    ld_lazy = _semi_join_filter(ld_lazy, "ID_A", rs_series)
-    ld_lazy = _semi_join_filter(ld_lazy, "ID_B", snp_series)
+    ld_lazy = _semi_join_filter(ld_lazy, "ID_A", rs_series)          # ID_A anchor
+    if pairwise:
+        ld_lazy = _semi_join_filter(ld_lazy, "ID_B", snp_series)     # ID_B: pairwise only
 
     maf1_col = "MAF_1" if "MAF_1" in cols else ("MAF1" if "MAF1" in cols else "NONMAJ_FREQ_A")
     ld_lazy = ld_lazy.filter(pl.col(maf1_col).cast(pl.Float32) >= pl.lit(maf_threshold, dtype=pl.Float32))
@@ -460,11 +612,11 @@ def _generic_vcor_pairwise(rs_series, R2_threshold, maf_threshold, ld_file, imp_
 
 
 def hg38_1kg_LD_info_high_coverage_pairwise(rs_series, R2_threshold, population, maf_threshold, chrom, imp_snp_list,
-                                            ld_prune=False):
+                                            ld_prune=False, pairwise: bool = True):
     print(f"Building query plan: 1KGP high-cov files ({population}) chr{chrom}...")
     ld_file = f'D:/ref/1KGP_high_coverage/LD_{population}_r_unphased/{population}_chr{chrom}_r_unphased.vcor.parquet'
     return _generic_vcor_pairwise(rs_series, R2_threshold, maf_threshold, ld_file, imp_snp_list, ld_prune,
-                                  is_phased=False)
+                                  is_phased=False, pairwise=pairwise)
 
 
 def hg38_1kg_process_high_coverage_pairwise(rs_series, r2threshold, population, maf_input, chromosome, imp_snp_list,
@@ -473,7 +625,8 @@ def hg38_1kg_process_high_coverage_pairwise(rs_series, r2threshold, population, 
                                                    imp_snp_list, ld_prune)
 
 
-def HGDP_LD_info_pairwise(rs_series, R2_threshold, population, maf_threshold, chrom, imp_snp_list, ld_prune=False):
+def HGDP_LD_info_pairwise(rs_series, R2_threshold, population, maf_threshold, chrom, imp_snp_list, ld_prune=False,
+                          pairwise: bool = True):
     pop_map = {
         "EUR": "EUROPE",
         "EAS": "EAST_ASIA",
@@ -483,21 +636,22 @@ def HGDP_LD_info_pairwise(rs_series, R2_threshold, population, maf_threshold, ch
         "MID": "MIDDLE_EAST",
         "OCE": "OCEANIA"
     }
-    
+
     # Safely convert to uppercase if input is abbreviation, otherwise fall back to string as-is
     hgdp_pop = pop_map.get(str(population).upper(), population)
-    
+
     print(f"Building query plan: HGDP files ({hgdp_pop}) chr{chrom}...")
     ld_file = f'D:/ref/HGDP/LD_{hgdp_pop}_r_phased/{hgdp_pop}_chr{chrom}_r_phased.vcor.parquet'
     return _generic_vcor_pairwise(rs_series, R2_threshold, maf_threshold, ld_file, imp_snp_list, ld_prune,
-                                  is_phased=True)
+                                  is_phased=True, pairwise=pairwise)
 
 
 def HGDP_process_pairwise(rs_series, r2threshold, population, maf_input, chromosome, imp_snp_list, ld_prune=False):
     return HGDP_LD_info_pairwise(rs_series, r2threshold, population, maf_input, chromosome, imp_snp_list, ld_prune)
 
 
-def UKBB_LD_info_pairwise(rs_series, R2_threshold, population, maf_threshold, chrom, imp_snp_list, ld_prune=False):
+def UKBB_LD_info_pairwise(rs_series, R2_threshold, population, maf_threshold, chrom, imp_snp_list, ld_prune=False,
+                          pairwise: bool = True):
     print(f"Building query plan: UK Biobank ({population}) chr{chrom}...")
     snp_series = _get_snp_series(rs_series, imp_snp_list)
     ld_file = f'D:/ref/UKBB/{population}/chr_{chrom}_ld.parquet'
@@ -515,8 +669,9 @@ def UKBB_LD_info_pairwise(rs_series, R2_threshold, population, maf_threshold, ch
         return ld_lazy
 
     cols = ld_lazy.collect_schema().names()
-    ld_lazy = _semi_join_filter(ld_lazy, "snp1", rs_series)
-    ld_lazy = _semi_join_filter(ld_lazy, "snp2", snp_series)
+    ld_lazy = _semi_join_filter(ld_lazy, "snp1", rs_series)          # snp1 anchor
+    if pairwise:
+        ld_lazy = _semi_join_filter(ld_lazy, "snp2", snp_series)     # snp2: pairwise only
 
     maf1_col = "maf1" if "maf1" in cols else ("MAF1" if "MAF1" in cols else "maf1")
     ld_lazy = ld_lazy.filter(pl.col(maf1_col).cast(pl.Float32) >= pl.lit(maf_threshold, dtype=pl.Float32))
@@ -537,39 +692,120 @@ def UKBB_LD_info_pairwise(rs_series, R2_threshold, population, maf_threshold, ch
 def UKBB_process_pairwise(rs_series, r2threshold, population, maf_input, chromosome, imp_snp_list, ld_prune=False):
     return UKBB_LD_info_pairwise(rs_series, r2threshold, population, maf_input, chromosome, imp_snp_list, ld_prune)
 
+# -------------------------------------------------------------------
+# LASI-DAD (pairwise)
+# -------------------------------------------------------------------
 
+def LASI_DAD_LD_info_pairwise(rs_series, R2_threshold, population, maf_threshold, chrom, imp_snp_list, ld_prune=False,
+                              pairwise: bool = True):
+    print(f"Building query plan: LASI-DAD files chr{chrom}...")
+    snp_series = _get_snp_series(rs_series, imp_snp_list)
+
+    # LASI-DAD is a single-population (South Asian) panel, so `population` is
+    # accepted for interface compatibility but not used to build the path.
+    # >>> Adjust this path/pattern to match your actual layout. <
+    ld_file = f'D:/ref/LASI_DAD/chr{chrom}_ld_with_rsids.parquet'
+
+    ld_lazy = pl.scan_parquet(ld_file)
+
+    # ---- LD-pruning mode: only rsIDs + R2 are needed ----
+    if ld_prune:
+        ld_lazy = ld_lazy.select(["rsid1", "rsid2", "R2"])
+        ld_lazy = _semi_join_filter(ld_lazy, "rsid1", rs_series)
+        ld_lazy = _semi_join_filter(ld_lazy, "rsid2", snp_series)
+
+        ld_lazy = ld_lazy.rename({"rsid1": "SNP1", "rsid2": "SNP2"})
+        # R2 is stored directly in the panel (no need to square r).
+        if R2_threshold is not None:
+            ld_lazy = ld_lazy.filter(pl.col("R2").cast(pl.Float32) >= pl.lit(R2_threshold, dtype=pl.Float32))
+        return ld_lazy
+
+    # ---- Full retrieval mode ----
+    ld_lazy = _semi_join_filter(ld_lazy, "rsid1", rs_series)          # rsid1 anchor
+    if pairwise:
+        ld_lazy = _semi_join_filter(ld_lazy, "rsid2", snp_series)     # rsid2: pairwise only
+
+    # AF1/AF2 are ALT-allele frequencies (can be > 0.5), so derive the true
+    # minor-allele frequency as min(AF, 1 - AF) before applying the MAF filter.
+    ld_lazy = ld_lazy.with_columns([
+        pl.min_horizontal(
+            pl.col("AF1").cast(pl.Float32), 1.0 - pl.col("AF1").cast(pl.Float32)
+        ).alias("MAF1"),
+        pl.min_horizontal(
+            pl.col("AF2").cast(pl.Float32), 1.0 - pl.col("AF2").cast(pl.Float32)
+        ).alias("MAF2"),
+    ])
+
+    if maf_threshold is not None:
+        ld_lazy = ld_lazy.filter(pl.col("MAF1") >= pl.lit(maf_threshold, dtype=pl.Float32))
+
+    if R2_threshold is not None:
+        ld_lazy = ld_lazy.filter(pl.col("R2").cast(pl.Float32) >= pl.lit(R2_threshold, dtype=pl.Float32))
+
+    # Reconstruct signed r from the stored Sign column: r = sign * sqrt(R2)
+    ld_lazy = ld_lazy.with_columns(
+        (pl.col("Sign").cast(pl.Float32) * pl.col("R2").cast(pl.Float32).sqrt()).alias("r")
+    )
+
+    return (
+        ld_lazy
+        .rename({
+            "CHROM": "CHR",
+            "POS1": "pos1", "POS2": "pos2",
+            "rsid1": "rsID1", "rsid2": "rsID2",
+        })
+        .select([
+            "CHR", "pos1", "pos2", "rsID1", "rsID2",
+            "MAF1", "MAF2", "REF1", "REF2", "ALT1", "ALT2",
+            "R2", "r", "Dprime",
+        ])
+    )
+
+
+def LASI_DAD_process_pairwise(rs_series, r2threshold, population, maf_input, chromosome, imp_snp_list, ld_prune=False):
+    return LASI_DAD_LD_info_pairwise(rs_series, r2threshold, population, maf_input, chromosome, imp_snp_list, ld_prune)
 # -------------------------------------------------------------------
 # Non-Pairwise Functions (Wrappers for backward compatibility)
 # -------------------------------------------------------------------
 def hg38_1kg_LD_info_high_coverage(rs_series, chrom, pop, maf, R2, imp): return hg38_1kg_LD_info_high_coverage_pairwise(
-    rs_series, R2, pop, maf, chrom, imp)
+    rs_series, R2, pop, maf, chrom, imp, ld_prune=False, pairwise=False)
 
 
 def hg38_1kg_process_high_coverage(rs_series, r2, pop, maf, chrom, imp): return hg38_1kg_LD_info_high_coverage(
     rs_series, chrom, pop, maf, r2, imp)
 
 
-def HGDP_LD_info(rs_series, chrom, pop, maf, R2, imp): return HGDP_LD_info_pairwise(rs_series, R2, pop, maf, chrom, imp)
+#LASI-DAD
+def LASI_DAD_LD_info(rs_series, chrom, pop, maf, R2, imp): return LASI_DAD_LD_info_pairwise(rs_series, R2, pop, maf, chrom, imp, ld_prune=False, pairwise=False)
+
+def LASI_DAD_process(rs_series, r2, pop, maf, chrom, imp): return LASI_DAD_LD_info(rs_series, chrom, pop, maf, r2, imp)
+
+
+
+def HGDP_LD_info(rs_series, chrom, pop, maf, R2, imp): return HGDP_LD_info_pairwise(rs_series, R2, pop, maf, chrom, imp, ld_prune=False, pairwise=False)
 
 
 def HGDP_process(rs_series, r2, pop, maf, chrom, imp): return HGDP_LD_info(rs_series, chrom, pop, maf, r2, imp)
 
 
-def UKBB_LD_info(rs_series, chrom, pop, maf, R2, imp): return UKBB_LD_info_pairwise(rs_series, R2, pop, maf, chrom, imp)
+def UKBB_LD_info(rs_series, chrom, pop, maf, R2, imp): return UKBB_LD_info_pairwise(rs_series, R2, pop, maf, chrom, imp, ld_prune=False, pairwise=False)
 
 
 def UKBB_process(rs_series, r2, pop, maf, chrom, imp): return UKBB_LD_info(rs_series, chrom, pop, maf, r2, imp)
 
 
 def hg38_1kg_LD_info(rs_series, chrom, pop, maf, R2, imp): return hg38_1kg_LD_info_pairwise(rs_series, chrom, pop, maf,
-                                                                                            R2, imp)
+                                                                                            R2, imp, ld_prune=False,
+                                                                                            pairwise=False)
 
 
 def hg38_1kg_process(rs_series, r2, pop, maf, chrom, imp): return hg38_1kg_LD_info(rs_series, chrom, pop, maf, r2, imp)
 
 
 def Hap_Map_LD_info_dask(rs_series, chrom, pop, maf, R2, imp): return Hap_Map_LD_info_dask_pairwise(rs_series, chrom,
-                                                                                                    pop, maf, R2, imp)
+                                                                                                    pop, maf, R2, imp,
+                                                                                                    ld_prune=False,
+                                                                                                    pairwise=False)
 
 
 def Hap_Map_process(rs_series, r2, pop, maf, chrom, imp): return Hap_Map_LD_info_dask(rs_series, chrom, pop, maf, r2,
@@ -577,7 +813,7 @@ def Hap_Map_process(rs_series, r2, pop, maf, chrom, imp): return Hap_Map_LD_info
 
 
 def pheno_Scanner_LD_info_dask(rs_series, chrom, pop, maf, R2, imp): return pheno_Scanner_LD_info_dask_pairwise(
-    rs_series, chrom, pop, maf, R2, imp)
+    rs_series, chrom, pop, maf, R2, imp, ld_prune=False, pairwise=False)
 
 
 def pheno_Scanner_process(rs_series, r2, pop, maf, chrom, imp): return pheno_Scanner_LD_info_dask(rs_series, chrom, pop,
@@ -585,7 +821,8 @@ def pheno_Scanner_process(rs_series, r2, pop, maf, chrom, imp): return pheno_Sca
 
 
 def TOP_LD_info(rs_series, chrom, pop, maf, R2, imp=None): return TOP_LD_info_pairwise(rs_series, chrom, pop, maf, R2,
-                                                                                       imp)
+                                                                                       imp, ld_prune=False,
+                                                                                       pairwise=False)
 
 
 def TOP_LD_process(rs_series, r2, pop, maf, chrom, imp): return TOP_LD_info(rs_series, chrom, pop, maf, r2, imp)
@@ -615,8 +852,18 @@ def _normalize_autosomal_chroms(values) -> list[int]:
     return sorted(out)
 
 
-def _get_study_info_chunked(file_path: str, is_pairwise: bool = False):
-    """Loads the GWAS input file in chunks to extract SNPs and Chromosomes without memory spikes."""
+def _get_study_info_chunked(file_path: str, is_pairwise: bool = False,
+                            sig_keep: str | None = None, sig_metric: str = "P",
+                            sig_threshold: float = 5e-8,
+                            z_col: str = "Z", beta_col: str = "BETA", se_col: str = "SE",
+                            p_col: str = "P"):
+    """Loads the GWAS input file in chunks to extract SNPs and Chromosomes without memory spikes.
+
+    When ``sig_keep`` is "significant" or "nonsignificant", each chunk is filtered
+    (Wald z = BETA/SE, two-tailed p from z) so only the requested variants survive
+    to become LD anchors. Filtering here propagates to every panel and to both the
+    global and pairwise retrieval modes, and stays fully chunked / out-of-core.
+    """
     print("Scanning input file in chunks to preserve memory...")
 
     # Using read_csv_batched to iterate over massive files natively chunk-by-chunk
@@ -625,6 +872,7 @@ def _get_study_info_chunked(file_path: str, is_pairwise: bool = False):
     chroms_set = set()
     snps_chunks = []
     study_cols = None
+    filt_expr = None  # significance keep-expression, resolved once we see the header
 
     while True:
         batches = reader.next_batches(5)  # Process 5 chunks into memory at a time
@@ -633,11 +881,21 @@ def _get_study_info_chunked(file_path: str, is_pairwise: bool = False):
         for chunk in batches:
             if study_cols is None:
                 study_cols = chunk.columns
+                if sig_keep is not None:
+                    filt_expr, filt_desc = _significance_filter_expr(
+                        study_cols, sig_keep, sig_metric, sig_threshold,
+                        z_col, beta_col, se_col, p_col)
+                    if filt_expr is None:
+                        print(f"[significance filter] SKIPPED — {filt_desc}")
+                    else:
+                        print(f"[significance filter] keeping {sig_keep.upper()} variants: {filt_desc}")
+
+            work = chunk.filter(filt_expr) if filt_expr is not None else chunk
 
             if "CHR" in study_cols:
-                chroms_set.update(chunk.get_column("CHR").drop_nulls().unique().to_list())
+                chroms_set.update(work.get_column("CHR").drop_nulls().unique().to_list())
             if "SNP" in study_cols:
-                snps_chunks.append(chunk.get_column("SNP").drop_nulls().unique())
+                snps_chunks.append(work.get_column("SNP").drop_nulls().unique())
 
     if snps_chunks:
         rs_series = pl.concat(snps_chunks).unique(maintain_order=False)
@@ -658,18 +916,24 @@ def _get_study_info_chunked(file_path: str, is_pairwise: bool = False):
     return chroms, rs_series, study_cols
 
 
-def process_data(file_path, r2threshold, population, maf_input, ref_file, imp_snp_list):
+def process_data(file_path, r2threshold, population, maf_input, ref_file, imp_snp_list,
+                 sig_keep: str | None = None, sig_metric: str = "P", sig_threshold: float = 5e-8,
+                 z_col: str = "Z", beta_col: str = "BETA", se_col: str = "SE", p_col: str = "P"):
     # Determine execution strategy based on file size threshold (500MB)
     file_size_mb = os.path.getsize(file_path) / (1024 * 1024)
     is_large_file = file_size_mb > 500
 
     with pl.StringCache():
-        chroms, rs_series, study_cols = _get_study_info_chunked(file_path, is_pairwise=False)
+        chroms, rs_series, study_cols = _get_study_info_chunked(
+            file_path, is_pairwise=False,
+            sig_keep=sig_keep, sig_metric=sig_metric, sig_threshold=sig_threshold,
+            z_col=z_col, beta_col=beta_col, se_col=se_col, p_col=p_col)
 
         processors = {
             "1000G_hg38": hg38_1kg_process, "1000G_hg38_high_cov": hg38_1kg_process_high_coverage,
             "UKBB": UKBB_process, "HGDP": HGDP_process, "TOP_LD": TOP_LD_process,
-            "Pheno_Scanner": pheno_Scanner_process, "Hap_Map": Hap_Map_process
+            "Pheno_Scanner": pheno_Scanner_process, "Hap_Map": Hap_Map_process,
+            "LASI_DAD": LASI_DAD_process,
         }
 
         if ref_file not in processors:
@@ -714,18 +978,38 @@ def process_data(file_path, r2threshold, population, maf_input, ref_file, imp_sn
 
 def process_data_pairwise(
         file_path, r2threshold, population, maf_input, ref_file, imp_snp_list,
-        ld_prune: bool = False, ld_prune_p_col: str | None = "P", ld_prune_out_prefix: str = "LD_pruned",
-        ld_prune_threshold: float | None = None, ld_prune_mode: str = "below"
+        ld_prune: bool = False,
+        ld_prune_p_col: str | None = "P",
+        ld_prune_p_threshold: float | None = None,
+        ld_prune_p_threshold_mode: str = "below",
+        ld_prune_z_col: str | None = "Z",
+        ld_prune_z_threshold: float | None = 2.0,
+        ld_prune_metric: str = "P",
+        ld_prune_out_prefix: str = "LD_pruned",
+        sig_keep: str | None = None, sig_metric: str = "P", sig_threshold: float = 5e-8,
+        z_col: str = "Z", beta_col: str = "BETA", se_col: str = "SE", p_col: str = "P"
 ):
     # Determine execution strategy based on file size threshold (500MB)
     file_size_mb = os.path.getsize(file_path) / (1024 * 1024)
     is_large_file = file_size_mb > 500
 
     with pl.StringCache():
-        chroms, rs_series, study_cols = _get_study_info_chunked(file_path, is_pairwise=True)
+        chroms, rs_series, study_cols = _get_study_info_chunked(
+            file_path, is_pairwise=True,
+            sig_keep=sig_keep, sig_metric=sig_metric, sig_threshold=sig_threshold,
+            z_col=z_col, beta_col=beta_col, se_col=se_col, p_col=p_col)
 
         # We still define the lazy frame to execute sinks/filters downstream in an out-of-core manner.
         study_lazy = pl.scan_csv(file_path, separator="\t")
+
+        # Apply the same significance filter to the lazy scan so the Numba LD-pruner
+        # (ld_prune branch below) operates on exactly the kept variant set.
+        if sig_keep is not None and study_cols is not None:
+            _sig_expr, _ = _significance_filter_expr(
+                study_cols, sig_keep, sig_metric, sig_threshold,
+                z_col, beta_col, se_col, p_col)
+            if _sig_expr is not None:
+                study_lazy = study_lazy.filter(_sig_expr)
 
         panel_cfg = {
             "1000G_hg38": {"fn": hg38_1kg_process_pairwise, "snp1_col": "SNP_A", "snp2_col": "SNP_B"},
@@ -736,6 +1020,7 @@ def process_data_pairwise(
             "TOP_LD": {"fn": TOP_LD_process_pairwise, "snp1_col": "rsID1", "snp2_col": "rsID2"},
             "Hap_Map": {"fn": Hap_Map_process_pairwise, "snp1_col": "rsID1", "snp2_col": "rsID2"},
             "Pheno_Scanner": {"fn": pheno_Scanner_process_pairwise, "snp1_col": "rsID1", "snp2_col": "rsID2"},
+            "LASI_DAD": {"fn": LASI_DAD_process_pairwise, "snp1_col": "rsID1", "snp2_col": "rsID2"},
         }
 
         if ref_file not in panel_cfg: raise ValueError(f"Unsupported ref_panel: {ref_file}")
@@ -748,13 +1033,14 @@ def process_data_pairwise(
 
         if not ld_prune:
             tmp_files = []
-            
+
             for i in range(0, len(chroms), batch_size):
                 batch_chroms = chroms[i:i + batch_size]
                 lazy_results_list = []
 
                 for chrom in batch_chroms:
-                    lazy_data = proc_fn(rs_series, r2threshold, population, maf_input, chrom, imp_snp_list, ld_prune=False)
+                    lazy_data = proc_fn(rs_series, r2threshold, population, maf_input, chrom, imp_snp_list,
+                                        ld_prune=False)
                     if lazy_data is not None:
                         lazy_results_list.append(lazy_data)
                         print(f"Evaluation graph for chr{chrom} constructed.")
@@ -792,7 +1078,8 @@ def process_data_pairwise(
                 kept_lazy_list = []
 
                 for chrom in batch_chroms:
-                    lazy_data = proc_fn(rs_series, r2threshold, population, maf_input, chrom, imp_snp_list, ld_prune=True)
+                    lazy_data = proc_fn(rs_series, r2threshold, population, maf_input, chrom, imp_snp_list,
+                                        ld_prune=True)
                     if lazy_data is None:
                         continue
 
@@ -806,14 +1093,21 @@ def process_data_pairwise(
                         )
                     else:
                         if i == 0:
-                            print(f"WARNING: 'CHR' column missing in GWAS data. Pruning against chr{chrom} LD will output ALL chromosomes in this file!")
+                            print(
+                                f"WARNING: 'CHR' column missing in GWAS data. Pruning against chr{chrom} LD will output ALL chromosomes in this file!")
                         chr_study_lazy = study_lazy
 
                     kept_gwas_lazy = ld_prune_pairs(
                         study_lazy=chr_study_lazy,
                         ld_pairs_lazy=lazy_data,
-                        snp_col="SNP", p_col=ld_prune_p_col,
-                        snp1_col=snp1_col, snp2_col=snp2_col, threshold=ld_prune_threshold, threshold_mode=ld_prune_mode
+                        snp_col="SNP",
+                        p_col=ld_prune_p_col,
+                        p_threshold=ld_prune_p_threshold,
+                        p_threshold_mode=ld_prune_p_threshold_mode,
+                        z_col=ld_prune_z_col,
+                        z_threshold=ld_prune_z_threshold,
+                        prune_metric=ld_prune_metric,
+                        snp1_col=snp1_col, snp2_col=snp2_col
                     )
                     kept_lazy_list.append(kept_gwas_lazy)
 
