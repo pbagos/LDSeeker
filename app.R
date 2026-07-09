@@ -8,6 +8,7 @@ library(base64enc)
 library(gaston)
 library(visNetwork)
 library(igraph)
+library(arrow)
 
 # Fix: Ensure 'p' refers to the Shiny HTML paragraph tag
 p <- shiny::p
@@ -60,6 +61,7 @@ default_pops <- c("EUR", "AFR", "AMR", "EAS", "SAS")
 hapmap_pops <- c("YRI", "CHB", "JPT", "CEU", "MKK", "LWK", "CHD", "GIH", "TSI", "MXL", "ASW")
 HGDP_pops <- c("OCEANIA", "EUROPE", "AFRICA", "EAST_ASIA", "CENTRAL_SOUTH_ASIA", "MIDDLE_EAST", "AMERICA")
 UKBB_pops <- c("EUR", "AFR", "EAS", "CSA", "MID", "AMR")
+LASI_DAD_pops <- c("IND")
 
 # --- ADVANCED BIOINFORMATIC THEME ---
 bio_theme <- bs_theme(
@@ -261,6 +263,7 @@ ui <- page_navbar(
                                   "Pheno Scanner" = "Pheno_Scanner", 
                                   "TOP-LD" = "TOP_LD", 
                                   "HapMap" = "Hap_Map",
+                                  "LASI-DAD" = "LASI_DAD",
                                   "Human Genome Diversity Project (HGDP)" = "HGDP",
                                   "UK Biobank (UKBB)" = "UKBB"
                                 ), 
@@ -325,16 +328,29 @@ ui <- page_navbar(
                     uiOutput("prune_cols_ui") # Dynamic Column Selectors
                 )
             ),
-            # Col 2: Filters & LD
+            # Col 2: Pruning & LD Parameters
             div(class = "input-group-card",
-                div(class = "input-group-header", "2. Filters & LD Parameters"),
+                div(class = "input-group-header", "2. Pruning & LD Parameters"),
                 div(class = "input-group-body",
                     layout_column_wrap(width = 1/2,
-                                       selectInput("prune_pval_dir", "P-value Filter", choices = c("P < Threshold" = "less", "P > Threshold" = "greater", "No Filter" = "none")),
-                                       numericInput("prune_pval_thresh", "Threshold", value = 1e-8)
+                                       numericInput("prune_r2_thresh", "R² Pruning Cutoff", value = 0.2, min = 0, max = 1, step = 0.01),
+                                       numericInput("prune_maf", "MAF Threshold", value = 0.01, min = 0, max = 1, step = 0.01)
                     ),
-                    numericInput("prune_r2_thresh", "R² Pruning Cutoff", value = 0.6, min = 0, max = 1, step = 0.05),
-                    p("Note: MAF is set to 0 for pruning.", style="font-size:0.8rem; color: #7f8c8d; margin-top:5px;")
+                    layout_column_wrap(width = 1/2,
+                                       selectInput("prune_metric", "Pruning Priority", choices = c("Smallest P-value" = "P", "Largest |Z-score|" = "Z"), selected = "P"),
+                                       numericInput("prune_z_thresh", "Pruning |Z| Threshold", value = 2.0, min = 0, step = 0.1)
+                    ),
+                    layout_column_wrap(width = 1/2,
+                                       selectInput("prune_pval_dir", "Pruning P Filter", choices = c("P < Threshold" = "below", "P > Threshold" = "above", "No P Filter" = "none"), selected = "none"),
+                                       numericInput("prune_pval_thresh", "Pruning P Threshold", value = 0.05, min = 0, max = 1, step = 1e-4)
+                    ),
+                    hr(),
+                    h6("Significance pre-filter", style = "margin-top: 5px; color: #2c3e50; font-weight: 700;"),
+                    layout_column_wrap(width = 1/2,
+                                       selectInput("prune_significance", "Keep", choices = c("No significance filter" = "none", "Significant only" = "significant", "Non-significant only" = "nonsignificant"), selected = "none"),
+                                       selectInput("prune_sig_metric", "Metric", choices = c("P-value" = "P", "|Z-score|" = "Z"), selected = "P")
+                    ),
+                    numericInput("prune_sig_thresh", "Significance Threshold", value = 5e-8, min = 0, step = 1e-8)
                 )
             ),
             # Col 3: Reference & Run
@@ -348,9 +364,10 @@ ui <- page_navbar(
                                   "Pheno Scanner"="Pheno_Scanner", 
                                   "TOP-LD"="TOP_LD", 
                                   "HapMap"="Hap_Map",
+                                  "LASI-DAD" = "LASI_DAD",
                                   "HGDP" = "HGDP",
                                   "UK Biobank" = "UKBB"
-                                ), selected = "1000G_hg38"),
+                                ), selected = "UKBB"),
                     selectInput("prune_population", "Population", choices = default_pops),
                     actionButton("run_pruning", "EXECUTE LDpruning", icon = icon("cut"), class = "btn-success w-100 mt-3")
                 )
@@ -372,13 +389,7 @@ ui <- page_navbar(
       ),
       br(),
       
-      # Stacked Cards for LD Results and Pruned Dataset
-      card(
-        card_header(span(fa("link"), " Identified LD Correlations (Pairs to Check)")),
-        full_screen = TRUE,
-        DTOutput("prune_ld_table")
-      ),
-      br(),
+      # Pruned Dataset
       card(
         card_header(
           div(
@@ -434,6 +445,7 @@ ui <- page_navbar(
                                                      "Pheno Scanner"="Pheno_Scanner", 
                                                      "TOP-LD"="TOP_LD", 
                                                      "HapMap"="Hap_Map",
+                                                     "LASI-DAD" = "LASI_DAD",
                                                      "Human Genome Diversity Project (HGDP)" = "HGDP",
                                                      "UK Biobank (UKBB)" = "UKBB"
                                                    )),
@@ -543,6 +555,73 @@ ui <- page_navbar(
   ),
   
   
+  # ---------- SNP to Gene Tab ----------
+  nav_panel(
+    title = "SNP to Gene",
+    value = "snp_gene_tab",
+    fluidPage(
+      card(
+        card_header(span(fa("dna"), " SNP to Gene Mapping")),
+        card_body(
+          layout_column_wrap(
+            width = 1/3,
+            div(class = "input-group-card",
+                div(class = "input-group-header", "1. Input Data"),
+                div(class = "input-group-body",
+                    fileInput("snp_gene_file", "Upload GWAS, rsID list, or LDSeeker results", accept = c(".txt", ".tsv", ".csv")),
+                    textAreaInput(
+                      "snp_gene_paste_rsids",
+                      "Or paste rsIDs / SNPs:",
+                      placeholder = "rs123\nrs456\nrs789",
+                      rows = 5
+                    )
+                )
+            ),
+            div(class = "input-group-card",
+                div(class = "input-group-header", "2. SNP Identifier Columns"),
+                div(class = "input-group-body",
+                    uiOutput("snp_gene_cols_ui"),
+                    p(
+                      em("Detected examples include rsID1, rsID_1, rsID2, rsid1, rsid2, rsid, rsID_A, rsID_B and the same patterns using SNP/snp."),
+                      style = "font-size: 0.9rem; color: #718096;"
+                    ),
+                    uiOutput("snp_gene_chr_ui")
+                )
+            ),
+            div(class = "input-group-card",
+                div(class = "input-group-header", "3. Reference & Run"),
+                div(class = "input-group-body",
+                    uiOutput("snp_gene_ref_status"),
+                    actionButton("run_snp_gene", "MAP SNPs TO GENES", icon = icon("dna"), class = "btn-primary w-100 mt-3")
+                )
+            )
+          )
+        )
+      ),
+      br(),
+      uiOutput("snp_gene_preview_section"),
+      br(),
+      layout_column_wrap(
+        width = 1/3,
+        value_box(title = "Unique Input SNPs", value = uiOutput("val_snp_gene_input"), showcase = fa("list"), theme = "primary"),
+        value_box(title = "Mapped SNPs", value = uiOutput("val_snp_gene_mapped"), showcase = fa("link"), theme = "success"),
+        value_box(title = "Unique Genes", value = uiOutput("val_snp_gene_genes"), showcase = fa("dna"), theme = "info")
+      ),
+      br(),
+      card(
+        card_header(
+          div(
+            class = "d-flex justify-content-between align-items-center",
+            span(fa("table"), " SNP to Gene Results"),
+            downloadButton("download_snp_gene", "Download Mapped Results", class = "btn-sm btn-light text-dark")
+          )
+        ),
+        full_screen = TRUE,
+        DTOutput("snp_gene_result_table")
+      )
+    )
+  ),
+  
   # ---------- Documentation ----------
   nav_panel(
     title = span(fa("book"), " Documentation"),
@@ -563,7 +642,8 @@ ui <- page_navbar(
                 tags$ul(
                   tags$li(strong("LDpatterns:"), " Explore LD given a set of rsIDs (from GWAS or a list). In 'Standard' mode, it queries LD relative to the input set. In 'Pairwise' mode, it computes an NxN correlation matrix for all input variants."),
                   tags$li(strong("LDassoc:"), " It highlights an 'Index SNP' and maps all other regional SNPs relative to its LD and genomic position."),
-                  tags$li(strong("LDpruning:"), " Pruning is used to identify independent genetic signals. Useful for obtaining independent sets from a GWAS.")
+                  tags$li(strong("LDpruning:"), " Pruning is used to identify independent genetic signals. Useful for obtaining independent sets from a GWAS."),
+                  tags$li(strong("SNP to Gene:"), " Annotate uploaded GWAS files, rsID/SNP lists, or LDSeeker outputs by matching SNP identifiers to gene symbols from local chromosome-wise parquet mapping files.")
                 )
               )
             ),
@@ -579,7 +659,8 @@ ui <- page_navbar(
                            tags$tbody(
                              tags$tr(tags$td("LDpatterns"), tags$td("SNP (rsID), CHR"), tags$td("BP (Pos)")),
                              tags$tr(tags$td("LDassoc"), tags$td("SNP, CHR, BP, P-value"), tags$td("Alleles, BETA")),
-                             tags$tr(tags$td("LDpruning"), tags$td("SNP, CHR"), tags$td("P-value (for significance-based pruning)"))
+                             tags$tr(tags$td("LDpruning"), tags$td("SNP, CHR"), tags$td("P-value (for significance-based pruning)")),
+                             tags$tr(tags$td("SNP to Gene"), tags$td("At least one rsID/SNP identifier column"), tags$td("CHR/CHROM columns help restrict the chromosome-wise parquet lookup"))
                            )
                 ),
                 p(em("Note: Genetic coordinates should be consistent with the selected Reference Panel build (e.g., hg38 for 1000G High Cov)."), style = "font-size: 0.9rem;")
@@ -598,16 +679,45 @@ ui <- page_navbar(
             ),
             
             accordion_panel(
-              title = "4. Reference Panel Statistics",
+              title = "4. SNP to Gene Mapping",
+              icon = fa("dna"),
+              div(
+                p(strong("SNP to Gene"), " maps SNP/rsID identifiers from uploaded GWAS files, plain rsID lists, or LDSeeker result tables to genes."),
+                tags$ul(
+                  tags$li("The local reference folder must be named ", code("snps_genes_ref"), " and must be located in the app working directory."),
+                  tags$li("The reference files are chromosome-wise parquet files such as ", code("snp_gene_map_chr1.parquet"), ", ", code("snp_gene_map_chr2.parquet"), ", ..., read with the ", code("arrow"), " library."),
+                  tags$li("Each parquet file must contain exactly the mapping columns ", code("Chromosome"), ", ", code("SNP"), " and ", code("Gene"), "."),
+                  tags$li("The app automatically detects SNP identifier columns such as ", code("rsID1"), ", ", code("rsID_1"), ", ", code("rsID2"), ", ", code("rsid1"), ", ", code("rsid2"), ", ", code("rsid"), ", ", code("rsID_A"), ", ", code("rsID_B"), " and equivalent ", code("SNP"), "/", code("snp"), " names."),
+                  tags$li("For each selected identifier column, the final table receives a corresponding gene annotation column, for example ", code("rsID1_Gene"), " and ", code("rsID2_Gene"), ". If one SNP maps to multiple genes, the genes are collapsed with semicolons.")
+                ),
+                p(em("Tip: If your input contains chromosome columns such as CHR, CHROM, CHROM_A or CHROM_B, the app uses them to read only the required chromosome parquet files."), style = "font-size: 0.9rem;")
+              )
+            ),
+            
+            accordion_panel(
+              title = "5. Reference Panel Statistics",
               icon = fa("database"),
               div(
                 p("Detailed population counts and available samples for each reference panel."),
                 tableOutput("ref_pop_table"),
                 hr(),
-                layout_column_wrap(
-                  width = 1/2,
-                  plotlyOutput("doc_samples_plot", height = "350px"),
-                  plotlyOutput("doc_pops_count_plot", height = "350px")
+                div(
+                  style = "display: grid; grid-template-columns: 1fr; gap: 1rem;",
+                  card(
+                    full_screen = TRUE,
+                    card_header(span(fa("users"), " Total samples per reference panel")),
+                    plotlyOutput("doc_samples_plot", height = "420px")
+                  ),
+                  card(
+                    full_screen = TRUE,
+                    card_header(span(fa("layer-group"), " Population groups per reference panel")),
+                    plotlyOutput("doc_pops_count_plot", height = "420px")
+                  ),
+                  card(
+                    full_screen = TRUE,
+                    card_header(span(fa("dna"), " Unique rsIDs / variants by reference panel")),
+                    plotlyOutput("doc_variants_plot", height = "520px")
+                  )
                 )
               )
             )
@@ -623,7 +733,7 @@ ui <- page_navbar(
     fluidPage(
       br(),
       fluidRow(
-        column(6, offset = 3,
+        column(8, offset = 2,
                card(
                  class = "shadow-lg",
                  card_header(span(fa("users"), " Credits & Contact")),
@@ -636,7 +746,6 @@ ui <- page_navbar(
                        p("Computational Genetics Group", style="color: #718096;"),
                        tags$a(href = "mailto:gmanios@uth.gr", "gmanios@uth.gr", style="color: #00d1b2; font-weight: 600; text-decoration: none;"),
                        
-                       
                        hr(style="width: 60%; margin: 20px auto; border-top: 1px solid #e2e8f0;"),
                        
                        h5("Correspondence"),
@@ -645,10 +754,40 @@ ui <- page_navbar(
                        
                        hr(style="width: 60%; margin: 20px auto; border-top: 1px solid #e2e8f0;"),
                        
-                       p(tags$a(href = "https://github.com/gmanios/LDSeeker", 
+                       p(tags$a(href = "https://github.com/pbagos/LDSeeker/", 
                                 span(fa("github"), " Visit GitHub Repository"), 
                                 target = "_blank", 
                                 class="btn btn-outline-dark"))
+                   )
+                 )
+               ),
+               br(),
+               card(
+                 card_header(span(fa("download"), " Download Reference panels and resources")),
+                 card_body(
+                   tags$div(
+                     class = "table-responsive",
+                     tags$table(
+                       class = "table table-sm table-hover align-middle",
+                       tags$thead(
+                         tags$tr(
+                           tags$th("Resource"),
+                           tags$th("Web address")
+                         )
+                       ),
+                       tags$tbody(
+                         tags$tr(tags$td("LDSeeker GitHub repository"), tags$td(tags$a(href = "https://github.com/pbagos/LDSeeker/", "https://github.com/pbagos/LDSeeker/", target = "_blank"))),
+                         tags$tr(tags$td("LDSeeker web tool"), tags$td(tags$a(href = "https://compgen.dib.uth.gr/LDSeeker/", "https://compgen.dib.uth.gr/LDSeeker/", target = "_blank"))),
+                         tags$tr(tags$td("UKBB LD reference panel"), tags$td(tags$a(href = "https://zenodo.org/records/18847278", "https://zenodo.org/records/18847278", target = "_blank"))),
+                         tags$tr(tags$td("1000 Genomes Project – high coverage LD reference panel"), tags$td(tags$a(href = "https://zenodo.org/records/18849097", "https://zenodo.org/records/18849097", target = "_blank"))),
+                         tags$tr(tags$td("1000 Genomes Project LD reference panel"), tags$td(tags$a(href = "https://zenodo.org/records/18861527", "https://zenodo.org/records/18861527", target = "_blank"))),
+                         tags$tr(tags$td("TOP-LD LD reference panel"), tags$td(tags$a(href = "http://195.251.108.185/ref_panels/TOP_LD", "http://195.251.108.185/ref_panels/TOP_LD", target = "_blank"))),
+                         tags$tr(tags$td("HapMap LD reference panel"), tags$td(tags$a(href = "https://zenodo.org/records/20213914", "https://zenodo.org/records/20213914", target = "_blank"))),
+                         tags$tr(tags$td("LASI-DAD LD reference panel"), tags$td(tags$a(href = "https://zenodo.org/records/20256884", "https://zenodo.org/records/20256884", target = "_blank"))),
+                         tags$tr(tags$td("HGDP LD reference panel"), tags$td(tags$a(href = "http://195.251.108.185/HGDP/", "http://195.251.108.185/HGDP/", target = "_blank"))),
+                         tags$tr(tags$td("SNP to Gene mapping reference"), tags$td(tags$a(href = "https://zenodo.org/records/20161132", "https://zenodo.org/records/20161132", target = "_blank")))
+                       )
+                     )
                    )
                  )
                )
@@ -666,8 +805,11 @@ server <- function(input, output, session) {
     assoc_data = NULL, 
     ldassoc_res = NULL,
     prune_data = NULL,
-    prune_ld_pairs = NULL,
     pruned_result = NULL,
+    snp_gene_data = NULL,
+    snp_gene_result = NULL,
+    snp_gene_map = NULL,
+    snp_gene_selected_cols = NULL,
     analysis_file_path = NULL, # Tracks if demo or uploaded file is active in Analysis tab
     heatmap_data = NULL # Stores loaded heatmap data
   )
@@ -686,6 +828,8 @@ server <- function(input, output, session) {
       updateSelectInput(session, "population", label = "Population (HGDP)", choices = HGDP_pops, selected = HGDP_pops[1])
     } else if (input$ref_panel == "UKBB") {
       updateSelectInput(session, "population", label = "Population (UKBB)", choices = UKBB_pops, selected = UKBB_pops[1])
+    } else if (input$ref_panel == "LASI_DAD") {
+      updateSelectInput(session, "population", label = "Population (LASI-DAD)", choices = LASI_DAD_pops, selected = LASI_DAD_pops[1])
     } else {
       updateSelectInput(session, "population", label = "Population Ancestry", choices = default_pops, selected = default_pops[1])
     }
@@ -699,6 +843,8 @@ server <- function(input, output, session) {
       updateSelectInput(session, "assoc_population", label = "Population (HGDP)", choices = HGDP_pops, selected = HGDP_pops[1])
     } else if (input$assoc_ref_panel == "UKBB") {
       updateSelectInput(session, "assoc_population", label = "Population (UKBB)", choices = UKBB_pops, selected = UKBB_pops[1])
+    } else if (input$assoc_ref_panel == "LASI_DAD") {
+      updateSelectInput(session, "assoc_population", label = "Population (LASI-DAD)", choices = LASI_DAD_pops, selected = LASI_DAD_pops[1])
     } else {
       updateSelectInput(session, "assoc_population", label = "Population Ancestry", choices = default_pops, selected = default_pops[1])
     }
@@ -712,6 +858,8 @@ server <- function(input, output, session) {
       updateSelectInput(session, "prune_population", label = "Population (HGDP)", choices = HGDP_pops, selected = HGDP_pops[1])
     } else if (input$prune_ref_panel == "UKBB") {
       updateSelectInput(session, "prune_population", label = "Population (UKBB)", choices = UKBB_pops, selected = UKBB_pops[1])
+    } else if (input$prune_ref_panel == "LASI_DAD") {
+      updateSelectInput(session, "prune_population", label = "Population (LASI-DAD)", choices = LASI_DAD_pops, selected = LASI_DAD_pops[1])
     } else {
       updateSelectInput(session, "prune_population", label = "Population Ancestry", choices = default_pops, selected = default_pops[1])
     }
@@ -922,16 +1070,30 @@ server <- function(input, output, session) {
       rv$prune_data <- df
       col_names <- names(df)
       
-      # Defaults
-      default_snp <- col_names[grep("rs|snp|variant", col_names, ignore.case = TRUE)[1]]
-      default_pval <- col_names[grep("p.?val", col_names, ignore.case = TRUE)[1]]
-      default_chr <- col_names[grep("chr|chrom", col_names, ignore.case = TRUE)[1]] # Added
+      first_matching_col <- function(pattern, fallback = NA_character_) {
+        hits <- grep(pattern, col_names, ignore.case = TRUE, value = TRUE)
+        if (length(hits) > 0) hits[1] else fallback
+      }
+      none_if_missing <- function(x) {
+        if (length(x) == 0 || is.na(x) || is.null(x)) "None" else x
+      }
+      
+      # Robust defaults for common GWAS column names
+      default_snp  <- first_matching_col("^(SNP|RSID|RS_ID)$|rs|snp|variant", col_names[1])
+      default_chr  <- first_matching_col("^(CHR|CHROM|CHROMOSOME)$|chr|chrom", col_names[1])
+      default_pval <- first_matching_col("^(P|PVALUE|P_VALUE|PVAL)$|p.?val")
+      default_z    <- first_matching_col("^(Z|ZSCORE|Z_SCORE)$|z.?score")
+      default_beta <- first_matching_col("^(BETA|EFFECT|B)$|beta|effect")
+      default_se   <- first_matching_col("^(SE|STDERR|STD_ERROR|STANDARD_ERROR)$|std.?err|standard.?error")
       
       output$prune_cols_ui <- renderUI({
         tagList(
           selectInput("prune_col_snp", "SNP/rsID Column", choices = col_names, selected = default_snp),
-          selectInput("prune_col_chr", "Chromosome Column", choices = col_names, selected = default_chr), # Added
-          selectInput("prune_col_pval", "P-value Column (Optional)", choices = c("None", col_names), selected = if(!is.na(default_pval)) default_pval else "None")
+          selectInput("prune_col_chr", "Chromosome Column", choices = col_names, selected = default_chr),
+          selectInput("prune_col_pval", "P-value Column (Optional)", choices = c("None", col_names), selected = none_if_missing(default_pval)),
+          selectInput("prune_col_z", "Z-score Column (Optional)", choices = c("None", col_names), selected = none_if_missing(default_z)),
+          selectInput("prune_col_beta", "BETA Column (Optional)", choices = c("None", col_names), selected = none_if_missing(default_beta)),
+          selectInput("prune_col_se", "SE Column (Optional)", choices = c("None", col_names), selected = none_if_missing(default_se))
         )
       })
       
@@ -953,168 +1115,134 @@ server <- function(input, output, session) {
     })
   })
   
-  # 2. Execute Pruning
+  # 2. Execute LDSeeker pruning through the Python backend
   observeEvent(input$run_pruning, {
-    req(input$prune_file, rv$prune_data, input$prune_col_snp, input$prune_col_chr) # Added req
+    req(input$prune_file, rv$prune_data, input$prune_col_snp, input$prune_col_chr)
     
-    withProgress(message = "Pruning Dataset", value = 0, {
-      
-      # A. Prepare Data & Filter P-values
-      incProgress(0.1, "Filtering data...")
-      df_work <- copy(rv$prune_data)
-      
-      # Rename SNP and CHR col for internal logic
-      setnames(df_work, input$prune_col_snp, "SNP_ID_INTERNAL")
-      setnames(df_work, input$prune_col_chr, "CHR_INTERNAL") # Rename CHR
-      
-      # P-value filtering logic (Pre-filtering based on prompt "threshold above or below")
-      if (input$prune_col_pval != "None" && input$prune_pval_dir != "none") {
-        pval_col <- input$prune_col_pval
-        thresh <- input$prune_pval_thresh
+    withProgress(message = "Running LDSeeker LD pruning", value = 0, {
+      tryCatch({
+        incProgress(0.1, "Preparing GWAS input for LDSeeker...")
         
-        # Ensure numeric
-        df_work[[pval_col]] <- as.numeric(as.character(df_work[[pval_col]]))
+        df_python <- copy(rv$prune_data)
         
-        if (input$prune_pval_dir == "less") {
-          df_work <- df_work[get(pval_col) < thresh]
-        } else if (input$prune_pval_dir == "greater") {
-          df_work <- df_work[get(pval_col) > thresh]
+        # Standardize the columns required by LDSeeker.py.
+        # The original columns are preserved, while canonical SNP/CHR/P/Z/BETA/SE
+        # columns are added or overwritten for the Python argument names.
+        df_python[, SNP := as.character(get(input$prune_col_snp))]
+        df_python[, CHR := get(input$prune_col_chr)]
+        
+        p_col_for_python <- "__NO_P_COLUMN__"
+        z_col_for_python <- "__NO_Z_COLUMN__"
+        beta_col_for_python <- "__NO_BETA_COLUMN__"
+        se_col_for_python <- "__NO_SE_COLUMN__"
+        
+        if (!is.null(input$prune_col_pval) && input$prune_col_pval != "None") {
+          df_python[, P := as.numeric(as.character(get(input$prune_col_pval)))]
+          p_col_for_python <- "P"
         }
-      }
-      
-      if(nrow(df_work) == 0) {
-        showNotification("No variants remained after P-value filtering.", type = "warning")
-        return()
-      }
-      
-      # B. Prepare LDSeeker Input (SNP list)
-      incProgress(0.2, "Calculating Pairwise LD...")
-      tmp_prune_input <- tempfile(fileext = ".txt")
-      # Write with header "SNP" and "CHR" 
-      fwrite(df_work[, .(SNP = SNP_ID_INTERNAL, CHR = CHR_INTERNAL)], tmp_prune_input, sep = "\t")
-      
-      # C. Run LDSeeker (Pairwise + MAF 0)
-      cmd <- paste("python LDSeeker.py", 
-                   "--file-path", shQuote(tmp_prune_input), 
-                   "--r2threshold", input$prune_r2_thresh, 
-                   "--pop", input$prune_population, 
-                   "--maf", 0, 
-                   "--ref", input$prune_ref_panel, 
-                   "--pairwise", "YES")
-      
-      system(cmd)
-      
-      # D. Parse Results & Prune
-      incProgress(0.6, "Identifying independent variants...")
-      ld_file <- "LD_info_chr_all_pairwise.txt"
-      
-      # Initial Lists
-      kept_snps <- c()
-      removed_snps <- c()
-      
-      # Sort DF by P-value if available to prioritize keeping significant ones
-      # If no P-value, rely on file order
-      if (input$prune_col_pval != "None") {
-        # Assuming we want to KEEP the most significant (smallest P)
-        setorderv(df_work, input$prune_col_pval, order = 1, na.last = TRUE)
-      }
-      
-      sorted_snps <- df_work$SNP_ID_INTERNAL
-      
-      if (file.exists(ld_file)) {
-        ld_res <- fread(ld_file)
-        
-        # STORE LD PAIRS FOR PREVIEW
-        rv$prune_ld_pairs <- ld_res
-        
-        # Normalize LD columns
-        c1 <- if("rsID1" %in% names(ld_res)) "rsID1" else "SNP_A"
-        c2 <- if("rsID2" %in% names(ld_res)) "rsID2" else "SNP_B"
-        r2_col <- if("R2" %in% names(ld_res)) "R2" else "r2"
-        
-        if (!is.null(c1) && !is.null(c2) && nrow(ld_res) > 0) {
-          # Filter LD results by threshold (just in case python script didn't filter exactly or to be safe)
-          high_ld_pairs <- ld_res[get(r2_col) >= input$prune_r2_thresh, .(S1 = get(c1), S2 = get(c2))]
-          
-          # Greedy Pruning Algorithm
-          # We iterate through the sorted list of SNPs (best to worst).
-          # If a SNP is not already removed, we keep it, and remove all its correlated partners.
-          
-          # Convert pairs to adjacency list for speed? 
-          # For R, subsetting data.table inside loop might be slow if N is huge, but robust.
-          
-          # Optimization: Mark removed status in a vector
-          is_removed <- logical(length(sorted_snps))
-          names(is_removed) <- sorted_snps
-          
-          # Pre-fetch neighbors to avoid repeated DT filtering?
-          # Let's use the DT pairs directly.
-          
-          # We iterate only through the high_ld_pairs actually? 
-          # No, we must iterate through ALL SNPs to ensure singletons are kept.
-          
-          # Vector of SNPs to process
-          all_candidates <- sorted_snps
-          
-          # Create a hash/environment for quick lookup of LD partners
-          # This assumes bi-directional pairs in 'high_ld_pairs'. 
-          # LDSeeker output is usually unique pairs (A-B). We need A-B and B-A.
-          pairs_rev <- high_ld_pairs[, .(S1 = S2, S2 = S1)]
-          all_pairs <- rbind(high_ld_pairs, pairs_rev)
-          setkey(all_pairs, S1)
-          
-          processed_count <- 0
-          
-          for (snp in all_candidates) {
-            if (is_removed[snp]) next
-            
-            # Keep this SNP
-            kept_snps <- c(kept_snps, snp)
-            
-            # Find neighbors in high LD
-            partners <- all_pairs[S1 == snp, S2]
-            
-            # Mark partners as removed
-            if (length(partners) > 0) {
-              partners_clean <- intersect(partners, all_candidates) # Only those in our list
-              is_removed[partners_clean] <- TRUE
-              # removed_snps <- c(removed_snps, partners_clean) # Optional tracking
-            }
-          }
-          
-          removed_snps <- names(is_removed)[is_removed]
-          
-        } else {
-          # No LD found -> Keep all
-          kept_snps <- sorted_snps
+        if (!is.null(input$prune_col_z) && input$prune_col_z != "None") {
+          df_python[, Z := as.numeric(as.character(get(input$prune_col_z)))]
+          z_col_for_python <- "Z"
         }
-      } else {
-        # No LD file -> Keep all
-        kept_snps <- sorted_snps
-        rv$prune_ld_pairs <- data.frame(Info = "No pairwise LD results generated (Variants may be on different chromosomes or no LD found).")
-      }
-      
-      # Final filtered dataset
-      # Restore original column names
-      setnames(df_work, "SNP_ID_INTERNAL", input$prune_col_snp)
-      setnames(df_work, "CHR_INTERNAL", input$prune_col_chr) # Restore CHR
-      
-      rv$pruned_result <- df_work[get(input$prune_col_snp) %in% kept_snps]
-      
-      # Update Stats
-      output$val_prune_initial <- renderUI(formatC(nrow(df_work), big.mark=","))
-      output$val_prune_removed <- renderUI(formatC(length(removed_snps), big.mark=","))
-      output$val_prune_final <- renderUI(formatC(length(kept_snps), big.mark=","))
-      
-      incProgress(1, "Done!")
+        if (!is.null(input$prune_col_beta) && input$prune_col_beta != "None") {
+          df_python[, BETA := as.numeric(as.character(get(input$prune_col_beta)))]
+          beta_col_for_python <- "BETA"
+        }
+        if (!is.null(input$prune_col_se) && input$prune_col_se != "None") {
+          df_python[, SE := as.numeric(as.character(get(input$prune_col_se)))]
+          se_col_for_python <- "SE"
+        }
+        
+        # Remove rows with missing essential identifiers before calling LDSeeker.
+        df_python <- df_python[!is.na(SNP) & SNP != "" & !is.na(CHR) & CHR != ""]
+        if (nrow(df_python) == 0) {
+          showNotification("No variants with non-missing SNP and CHR columns were found.", type = "warning")
+          return()
+        }
+        
+        tmp_prune_input <- tempfile(fileext = ".txt")
+        fwrite(df_python, tmp_prune_input, sep = "\t", quote = FALSE, na = "NA")
+        
+        # Clear old LDSeeker outputs so the UI never displays stale pruning results.
+        unlink(c("LD_info_chr_all_pairwise.txt", "LD_pruned_kept.txt", "LD_pruned_tmp_batch_*.txt"))
+        
+        incProgress(0.25, "Executing LDSeeker.py with --ld-prune YES...")
+        
+        python_cmd <- Sys.which("python")
+        if (python_cmd == "") python_cmd <- Sys.which("python3")
+        if (python_cmd == "") stop("Could not find python or python3 in PATH.")
+        
+        cmd_args <- c(
+          "LDSeeker.py",
+          "--file-path", tmp_prune_input,
+          "--r2threshold", as.character(input$prune_r2_thresh),
+          "--pop", input$prune_population,
+          "--maf", as.character(input$prune_maf),
+          "--ref", input$prune_ref_panel,
+          "--pairwise", "YES",
+          "--ld-prune", "YES",
+          "--ld-prune-prefix", "LD_pruned",
+          "--ld-prune-metric", input$prune_metric,
+          "--ld-prune-p-col", p_col_for_python,
+          "--ld-prune-z-col", z_col_for_python
+        )
+        
+        if (!is.null(input$prune_pval_dir) && input$prune_pval_dir != "none" && p_col_for_python == "P") {
+          cmd_args <- c(
+            cmd_args,
+            "--ld-prune-p-threshold", as.character(input$prune_pval_thresh),
+            "--ld-prune-p-threshold-mode", input$prune_pval_dir
+          )
+        }
+        
+        if (z_col_for_python == "Z") {
+          cmd_args <- c(cmd_args, "--ld-prune-z-threshold", as.character(input$prune_z_thresh))
+        }
+        
+        if (!is.null(input$prune_significance) && input$prune_significance != "none") {
+          cmd_args <- c(
+            cmd_args,
+            "--significance", input$prune_significance,
+            "--significance-metric", input$prune_sig_metric,
+            "--significance-threshold", as.character(input$prune_sig_thresh),
+            "--sig-p-col", p_col_for_python,
+            "--sig-z-col", z_col_for_python,
+            "--beta-col", beta_col_for_python,
+            "--se-col", se_col_for_python
+          )
+        }
+        
+        message("Running command: ", paste(c(python_cmd, shQuote(cmd_args)), collapse = " "))
+        cmd_output <- system2(python_cmd, args = cmd_args, stdout = TRUE, stderr = TRUE)
+        message(paste(cmd_output, collapse = "\n"))
+        
+        incProgress(0.55, "Reading LD_pruned_kept.txt...")
+        pruned_file <- "LD_pruned_kept.txt"
+        if (!file.exists(pruned_file)) {
+          rv$pruned_result <- NULL
+          showNotification("LDSeeker finished, but LD_pruned_kept.txt was not found.", type = "error")
+          return()
+        }
+        
+        rv$pruned_result <- fread(pruned_file)
+        
+        
+        initial_variants <- length(unique(df_python$SNP))
+        final_snp_col <- if ("SNP" %in% names(rv$pruned_result)) "SNP" else names(rv$pruned_result)[1]
+        final_variants <- length(unique(rv$pruned_result[[final_snp_col]]))
+        removed_variants <- max(initial_variants - final_variants, 0)
+        
+        output$val_prune_initial <- renderUI(formatC(initial_variants, big.mark = ","))
+        output$val_prune_removed <- renderUI(formatC(removed_variants, big.mark = ","))
+        output$val_prune_final <- renderUI(formatC(final_variants, big.mark = ","))
+        
+        incProgress(1, "Done!")
+        showNotification("LD pruning completed. LD_pruned_kept.txt is displayed in the pruning results.", type = "message")
+        
+      }, error = function(e) {
+        showNotification(paste("LD pruning failed:", e$message), type = "error")
+      })
     })
-  })
-  
-  output$prune_ld_table <- renderDT({
-    req(rv$prune_ld_pairs)
-    datatable(rv$prune_ld_pairs, extensions = 'Buttons', style = 'bootstrap5',
-              options = list(pageLength = 10, scrollX = TRUE, dom = 'Bfrtip',
-                             buttons = list('copy', 'csv', 'excel')))
   })
   
   output$pruned_table <- renderDT({
@@ -1125,7 +1253,7 @@ server <- function(input, output, session) {
   })
   
   output$download_pruned <- downloadHandler(
-    filename = function() { paste0("Pruned_Dataset_", format(Sys.Date(), "%Y%m%d"), ".txt") },
+    filename = function() { paste0("LD_pruned_kept_", format(Sys.Date(), "%Y%m%d"), ".txt") },
     content = function(file) {
       req(rv$pruned_result)
       fwrite(rv$pruned_result, file, sep = "\t")
@@ -1670,75 +1798,448 @@ server <- function(input, output, session) {
   
   
   
+  # --- SNP TO GENE LOGIC ---
+  
+  normalize_chr_values <- function(x) {
+    x <- trimws(as.character(x))
+    x <- toupper(gsub("^CHR", "", x, ignore.case = TRUE))
+    x <- gsub("\\.0$", "", x)
+    x[x %in% c("", "NA", "NAN", "NULL")] <- NA_character_
+    x
+  }
+  
+  detect_snp_identifier_cols <- function(col_names) {
+    if (length(col_names) == 0) return(character(0))
+    clean <- tolower(gsub("[^a-z0-9]", "", col_names))
+    exact <- grepl("^(rsid|rs|snp)([0-9]+|[ab])?$", clean)
+    common <- clean %in% c(
+      "rsnumber", "rsidnumber", "rsidentifier",
+      "snpid", "snpname", "snpidentifier",
+      "variant", "variantid", "variantname",
+      "marker", "markername", "markerid"
+    )
+    contains <- grepl("rsid|snp", clean)
+    unique(col_names[exact | common | contains])
+  }
+  
+  detect_chr_cols <- function(col_names) {
+    if (length(col_names) == 0) return(character(0))
+    clean <- tolower(gsub("[^a-z0-9]", "", col_names))
+    # Matches CHR, CHROM, #CHROM, CHROMOSOME, CHROM_A/B, chr22, and descriptive
+    # variants like chr_name, chr_no, chr_id, chrom_num, chromosome_number, etc.
+    keep <- grepl("^(chr|chrom|chromosome)([0-9]+|[ab]|no|num|number|name|id|pos)*$", clean)
+    unique(col_names[keep])
+  }
+  
+  get_unique_snps_from_cols <- function(df, snp_cols) {
+    snps <- unlist(lapply(snp_cols, function(cc) as.character(df[[cc]])), use.names = FALSE)
+    snps <- trimws(snps)
+    snps <- snps[!is.na(snps) & snps != ""]
+    unique(snps)
+  }
+  
+  get_chr_values_from_input <- function(df) {
+    chr_cols <- detect_chr_cols(names(df))
+    if (length(chr_cols) == 0) return(character(0))
+    chrs <- unlist(lapply(chr_cols, function(cc) as.character(df[[cc]])), use.names = FALSE)
+    chrs <- normalize_chr_values(chrs)
+    unique(chrs[!is.na(chrs) & chrs != ""])
+  }
+  
+  read_snp_gene_reference <- function(snps, chrs = character(0), ref_dir = "snps_genes_ref") {
+    if (!requireNamespace("arrow", quietly = TRUE)) {
+      stop("The arrow package is required. Install it with install.packages('arrow').")
+    }
+    if (!dir.exists(ref_dir)) {
+      stop(paste0("Reference folder not found: ", ref_dir, ". Place snp_gene_map_chr*.parquet files there."))
+    }
+    
+    snps <- unique(trimws(as.character(snps)))
+    snps <- snps[!is.na(snps) & snps != ""]
+    if (length(snps) == 0) stop("No valid SNP/rsID identifiers were found in the selected columns.")
+    snp_keys <- unique(tolower(snps))
+    
+    all_files <- list.files(ref_dir, pattern = "^snp_gene_map_chr.*\\.parquet$", full.names = TRUE, ignore.case = TRUE)
+    if (length(all_files) == 0) {
+      stop(paste0("No files matching snp_gene_map_chr*.parquet were found in ", ref_dir, "."))
+    }
+    
+    # Chromosome label carried by each reference file (e.g. snp_gene_map_chr22.parquet -> "22").
+    file_chrs <- normalize_chr_values(
+      sub("^snp_gene_map_chr", "", tools::file_path_sans_ext(basename(all_files)), ignore.case = TRUE)
+    )
+    
+    # Chromosomes actually present in the uploaded GWAS.
+    chrs <- normalize_chr_values(chrs)
+    chrs <- unique(chrs[!is.na(chrs) & chrs != ""])
+    
+    if (length(chrs) > 0) {
+      # STRICT chromosome-wise mapping: read ONLY the parquet files whose chromosome
+      # is present in the GWAS. No silent fall-back to the full genome.
+      keep         <- file_chrs %in% chrs
+      files        <- all_files[keep]
+      used_chrs    <- sort(unique(file_chrs[keep]))
+      missing_chrs <- sort(setdiff(chrs, file_chrs))  # GWAS chromosomes with no reference file
+      
+      if (length(files) == 0) {
+        stop(paste0(
+          "No SNP-gene reference files were found for the chromosome(s) in the input: ",
+          paste(sort(chrs), collapse = ", "),
+          ". Expected files like snp_gene_map_chr", sort(chrs)[1], ".parquet in ", ref_dir, "."
+        ))
+      }
+    } else {
+      # No chromosome column detected (e.g. a plain rsID list): scan every reference file.
+      files        <- all_files
+      used_chrs    <- sort(unique(file_chrs))
+      missing_chrs <- character(0)
+    }
+    
+    mapped_list <- lapply(files, function(f) {
+      out <- NULL
+      if (requireNamespace("dplyr", quietly = TRUE)) {
+        out <- tryCatch({
+          ds <- arrow::open_dataset(f, format = "parquet")
+          dplyr::collect(
+            dplyr::select(
+              dplyr::filter(ds, SNP %in% snps),
+              Chromosome, SNP, Gene
+            )
+          )
+        }, error = function(e) NULL)
+      }
+      
+      if (is.null(out)) {
+        out <- arrow::read_parquet(f, col_select = c("Chromosome", "SNP", "Gene"))
+      }
+      
+      out <- as.data.table(out)
+      missing_cols <- setdiff(c("Chromosome", "SNP", "Gene"), names(out))
+      if (length(missing_cols) > 0) {
+        stop(paste0("Reference file ", basename(f), " is missing columns: ", paste(missing_cols, collapse = ", ")))
+      }
+      out[, SNP_key := tolower(trimws(as.character(SNP)))]
+      out[SNP_key %in% snp_keys, .(Chromosome, SNP, Gene, SNP_key)]
+    })
+    
+    mapped <- rbindlist(mapped_list, fill = TRUE)
+    if (nrow(mapped) == 0) {
+      mapped <- data.table(Chromosome = character(), SNP = character(), Gene = character(), SNP_key = character())
+    } else {
+      mapped <- unique(mapped[!is.na(SNP_key) & SNP_key != ""])
+    }
+    
+    # Report which chromosomes / files were used (read by the caller for user feedback).
+    attr(mapped, "chr_requested") <- sort(chrs)
+    attr(mapped, "chr_used")      <- used_chrs
+    attr(mapped, "chr_missing")   <- missing_chrs
+    attr(mapped, "files_used")    <- basename(files)
+    mapped
+  }  
+  output$snp_gene_ref_status <- renderUI({
+    ref_dir <- "snps_genes_ref"
+    if (!dir.exists(ref_dir)) {
+      div(
+        class = "alert alert-warning mb-0",
+        span(fa("triangle-exclamation"), " Reference folder not found: ", code(ref_dir))
+      )
+    } else {
+      n_files <- length(list.files(ref_dir, pattern = "^snp_gene_map_chr.*\\.parquet$", ignore.case = TRUE))
+      div(
+        class = "alert alert-success mb-0",
+        span(fa("folder-open"), " Found ", n_files, " chromosome-wise SNP-gene parquet files in ", code(ref_dir), ".")
+      )
+    }
+  })
+  
+  observeEvent(input$snp_gene_file, {
+    req(input$snp_gene_file)
+    updateTextAreaInput(session, "snp_gene_paste_rsids", value = "")
+    tryCatch({
+      rv$snp_gene_data <- fread(input$snp_gene_file$datapath)
+      rv$snp_gene_result <- NULL
+      rv$snp_gene_map <- NULL
+    }, error = function(e) {
+      rv$snp_gene_data <- NULL
+      rv$snp_gene_result <- NULL
+      rv$snp_gene_map <- NULL
+      showNotification(paste("Could not read SNP to Gene input file:", e$message), type = "error")
+    })
+  })
+  
+  observeEvent(input$snp_gene_paste_rsids, {
+    txt <- input$snp_gene_paste_rsids
+    if (!is.null(txt) && grepl("\\w", txt)) {
+      tryCatch({
+        clean_txt <- gsub("[,; ]+", "\n", txt)
+        df <- fread(text = clean_txt, header = FALSE)
+        if (ncol(df) == 1) names(df) <- "SNP"
+        rv$snp_gene_data <- df
+        rv$snp_gene_result <- NULL
+        rv$snp_gene_map <- NULL
+      }, error = function(e) {
+        showNotification(paste("Could not parse pasted rsIDs/SNPs:", e$message), type = "error")
+      })
+    }
+  })
+  
+  output$snp_gene_cols_ui <- renderUI({
+    if (is.null(rv$snp_gene_data)) {
+      return(helpText("Upload a file or paste rsIDs to detect SNP identifier columns."))
+    }
+    col_names <- names(rv$snp_gene_data)
+    detected <- detect_snp_identifier_cols(col_names)
+    selected <- if (length(detected) > 0) detected else col_names[1]
+    tagList(
+      checkboxGroupInput(
+        "snp_gene_cols",
+        "Columns to map",
+        choices = col_names,
+        selected = selected
+      ),
+      if (length(detected) == 0) {
+        div(class = "alert alert-warning", "No obvious rsID/SNP columns were detected. Please select the correct column manually.")
+      } else {
+        div(class = "alert alert-info", paste("Auto-detected:", paste(detected, collapse = ", ")))
+      }
+    )
+  })
+  output$snp_gene_chr_ui <- renderUI({
+    if (is.null(rv$snp_gene_data)) return(NULL)
+    col_names <- names(rv$snp_gene_data)
+    detected  <- detect_chr_cols(col_names)
+    tagList(
+      selectInput(
+        "snp_gene_chr_col",
+        "Chromosome column (restricts parquet files)",
+        choices  = c("Auto-detect" = "__AUTO__", "All chromosomes" = "__ALL__", col_names),
+        selected = if (length(detected) > 0) "__AUTO__" else "__ALL__"
+      ),
+      if (length(detected) > 0) {
+        div(class = "alert alert-info", style = "font-size: 0.85rem;",
+            paste0("Auto-detected chromosome column(s): ", paste(detected, collapse = ", ")))
+      } else {
+        div(class = "alert alert-warning", style = "font-size: 0.85rem;",
+            "No chromosome column auto-detected \u2014 pick one to restrict, or leave 'All chromosomes'.")
+      }
+    )
+  })
+  output$snp_gene_preview_section <- renderUI({
+    req(rv$snp_gene_data)
+    card(
+      card_header(span(fa("file-alt"), " SNP to Gene Input Preview")),
+      DTOutput("snp_gene_preview_table")
+    )
+  })
+  
+  output$snp_gene_preview_table <- renderDT({
+    req(rv$snp_gene_data)
+    datatable(rv$snp_gene_data, style = "bootstrap5", options = list(pageLength = 5, scrollX = TRUE))
+  })
+  
+  observeEvent(input$run_snp_gene, {
+    req(rv$snp_gene_data)
+    snp_cols <- input$snp_gene_cols
+    if (is.null(snp_cols) || length(snp_cols) == 0) {
+      showNotification("Please select at least one rsID/SNP identifier column.", type = "warning")
+      return()
+    }
+    
+    withProgress(message = "Mapping SNPs to genes", value = 0, {
+      tryCatch({
+        incProgress(0.15, "Collecting SNP identifiers...")
+        df   <- copy(rv$snp_gene_data)
+        snps <- get_unique_snps_from_cols(df, snp_cols)
+        chr_choice <- input$snp_gene_chr_col
+        if (is.null(chr_choice) || chr_choice == "__AUTO__") {
+          chrs <- get_chr_values_from_input(df)
+        } else if (chr_choice == "__ALL__") {
+          chrs <- character(0)
+        } else if (chr_choice %in% names(df)) {
+          vals <- normalize_chr_values(as.character(df[[chr_choice]]))
+          chrs <- unique(vals[!is.na(vals) & vals != ""])
+        } else {
+          chrs <- get_chr_values_from_input(df)
+        }
+        
+        if (length(chrs) > 0) {
+          incProgress(0, paste0("Restricting to chromosome(s): ", paste(sort(chrs), collapse = ", ")))
+        } else {
+          incProgress(0, "No chromosome column detected; scanning all reference files.")
+        }
+        
+        incProgress(0.45, "Reading chromosome-wise parquet reference files...")
+        # Chromosome-aware lookup: if CHR/CHROM/CHROM_A/CHROM_B columns exist,
+        # read only the snp_gene_map_chr*.parquet files for chromosomes present in the input.
+        snp_gene_map <- read_snp_gene_reference(snps, chrs = chrs, ref_dir = "snps_genes_ref")
+        rv$snp_gene_map <- snp_gene_map
+        
+        used_chr    <- attr(snp_gene_map, "chr_used")
+        missing_chr <- attr(snp_gene_map, "chr_missing")
+        if (length(missing_chr) > 0) {
+          showNotification(
+            paste0("No reference file for chromosome(s): ", paste(missing_chr, collapse = ", "),
+                   ". SNPs on these chromosomes were not mapped."),
+            type = "warning", duration = 8
+          )
+        }
+        
+        incProgress(0.25, "Adding gene columns to the input table...")
+        if (nrow(snp_gene_map) > 0) {
+          collapsed_map <- snp_gene_map[!is.na(Gene) & Gene != "", .(
+            Gene = paste(sort(unique(as.character(Gene))), collapse = ";")
+          ), by = SNP_key]
+        } else {
+          collapsed_map <- data.table(SNP_key = character(), Gene = character())
+        }
+        
+        for (cc in snp_cols) {
+          key <- tolower(trimws(as.character(df[[cc]])))
+          gene_values <- collapsed_map$Gene[match(key, collapsed_map$SNP_key)]
+          df[, (paste0(cc, "_Gene")) := gene_values]
+        }
+        
+        # Place each generated Gene column immediately after its corresponding SNP/rsID column.
+        current_cols <- names(df)
+        ordered_cols <- character(0)
+        for (cc in current_cols) {
+          ordered_cols <- c(ordered_cols, cc)
+          gene_cc <- paste0(cc, "_Gene")
+          if (cc %in% snp_cols && gene_cc %in% current_cols) ordered_cols <- c(ordered_cols, gene_cc)
+        }
+        ordered_cols <- unique(c(ordered_cols, setdiff(current_cols, ordered_cols)))
+        setcolorder(df, ordered_cols)
+        
+        rv$snp_gene_result <- df
+        rv$snp_gene_selected_cols <- snp_cols
+        
+        incProgress(0.15, "Rendering results...")
+        showNotification(
+          paste0("SNP to Gene mapping completed",
+                 if (length(used_chr) > 0) paste0(" for chromosome(s): ", paste(used_chr, collapse = ", ")) else "",
+                 "."),
+          type = "message"
+        )
+      }, error = function(e) {
+        rv$snp_gene_result <- NULL
+        showNotification(paste("SNP to Gene mapping failed:", e$message), type = "error")
+      })
+    })
+  })
+  
+  output$val_snp_gene_input <- renderUI({
+    if (is.null(rv$snp_gene_data)) return("0")
+    snp_cols <- input$snp_gene_cols
+    if (is.null(snp_cols) || length(snp_cols) == 0) snp_cols <- detect_snp_identifier_cols(names(rv$snp_gene_data))
+    if (length(snp_cols) == 0) return("0")
+    formatC(length(get_unique_snps_from_cols(rv$snp_gene_data, snp_cols)), big.mark = ",")
+  })
+  
+  output$val_snp_gene_mapped <- renderUI({
+    if (is.null(rv$snp_gene_map) || nrow(rv$snp_gene_map) == 0) return("0")
+    mapped <- unique(rv$snp_gene_map[!is.na(Gene) & Gene != "", SNP_key])
+    formatC(length(mapped), big.mark = ",")
+  })
+  
+  output$val_snp_gene_genes <- renderUI({
+    if (is.null(rv$snp_gene_map) || nrow(rv$snp_gene_map) == 0) return("0")
+    genes <- unique(rv$snp_gene_map[!is.na(Gene) & Gene != "", as.character(Gene)])
+    formatC(length(genes), big.mark = ",")
+  })
+  
+  output$snp_gene_result_table <- renderDT({
+    req(rv$snp_gene_result)
+    datatable(rv$snp_gene_result, extensions = 'Buttons', style = 'bootstrap5',
+              options = list(pageLength = 15, scrollX = TRUE, dom = 'Bfrtip',
+                             buttons = list('copy', 'csv', 'excel')))
+  }, server = FALSE)
+  
+  output$download_snp_gene <- downloadHandler(
+    filename = function() { paste0("SNP_to_Gene_results_", format(Sys.Date(), "%Y%m%d"), ".txt") },
+    content = function(file) {
+      req(rv$snp_gene_result)
+      fwrite(rv$snp_gene_result, file, sep = "\t", quote = FALSE, na = "NA")
+    }
+  )
+  
   # --- DOCUMENTATION DATA & TABLES ---
   
-  # Centralized Data for Table and Plots
+  # Centralized Data for the reference-panel table and documentation plots
   ref_data_raw <- reactive({
-    # Define chunks to ensure row consistency
-    df_topld <- data.frame(
-      Panel_Raw = c("TOP-LD (hg38)", "", "", ""),
-      Label = c("EUR", "AFR", "SAS", "EAS"),
-      Sample_Name = c("European", "African", "South Asian", "East Asian"),
-      Count_Str = c("13,160", "1,335", "239", "844")
+    df <- data.frame(
+      Panel_Raw = c(
+        "TOP-LD (hg38)", "", "", "",
+        "PhenoScanner (Phase 3, hg19 & hg38)", "", "", "", "",
+        "HapMap (hg16)", "", "", "", "", "", "", "", "", "", "",
+        "1000 Genomes Project Phase 3 (hg38)", "", "", "", "",
+        "1000 Genomes Project Phase 3 (hg38), high coverage", "", "", "", "",
+        "UKBB (hg19)", "", "", "", "", "",
+        "LASI-DAD (hg38)",
+        "HGDP", "", "", "", "", "", ""
+      ),
+      Label = c(
+        "EUR", "AFR", "SAS", "EAS",
+        "EUR", "AFR", "SAS", "EAS", "AMR",
+        "ASW", "CEU", "CHB", "CHD", "GIH", "JPT", "LWK", "MEX", "MKK", "TSI", "YRI",
+        "EUR", "AFR", "SAS", "EAS", "AMR",
+        "EUR", "AFR", "SAS", "EAS", "AMR",
+        "EUR", "AFR", "CSA", "EAS", "AMR", "MID",
+        "IND",
+        "EUR", "AFR", "CSA", "EAS", "AMR", "MID", "OCN"
+      ),
+      Sample_Name = c(
+        "European", "African", "South Asian", "East Asian",
+        "European", "African", "South Asian", "East Asian", "American",
+        "African ancestry in Southwest USA",
+        "Utah residents with Northern and Western European ancestry from the CEPH collection",
+        "Han Chinese in Beijing, China",
+        "Chinese in Metropolitan Denver, Colorado",
+        "Gujarati Indians in Houston, Texas",
+        "Japanese in Tokyo, Japan",
+        "Luhya in Webuye, Kenya",
+        "Mexican ancestry in Los Angeles, California",
+        "Maasai in Kinyawa, Kenya",
+        "Toscans in Italy",
+        "Yoruba in Ibadan, Nigeria",
+        "European", "African", "South Asian", "East Asian", "Admixed American",
+        "European", "African", "South Asian", "East Asian", "Admixed American",
+        "European", "African", "Central and South Asian", "East Asian", "Admixed American", "Middle Eastern",
+        "Indian",
+        "European", "African", "Central South Asian", "East Asian", "Admixed American", "Middle Eastern", "Oceanian"
+      ),
+      Count_Str = c(
+        "13,160", "1,335", "239", "844",
+        "503", "661", "489", "504", "347",
+        "90", "180", "90", "100", "100", "91", "100", "90", "180", "100", "180",
+        "632", "893", "601", "585", "490",
+        "632", "893", "601", "585", "490",
+        "362,446", "6,255", "8,284", "2,700", "987", "1,567",
+        "2,680",
+        "155", "104", "197", "223", "61", "161", "28"
+      ),
+      Variants_Str = c(
+        "69,524,944", "60,392,677", "22,309,649", "35,538,656",
+        "11,159,862", "11,159,862", "11,159,862", "11,159,862", "11,159,862",
+        "1,561,113", "1,412,161", "1,328,283", "1,305,880", "1,407,540", "1,296,969", "1,529,438", "1,409,947", "1,419,626", "1,419,920", "1,501,085",
+        "8,193,280", "13,876,891", "8,579,150", "7,245,426", "9,347,814",
+        "9,263,406", "15,952,015", "9,439,730", "7,989,898", "10,106,451",
+        "1,431,634", "1,259,175", "1,379,991", "1,146,910", "1,286,943", "1,307,269",
+        "119,948,583",
+        "10,144,721", "18,062,644", "11,281,764", "9,631,805", "7,592,946", "11,731,317", "8,147,809"
+      ),
+      stringsAsFactors = FALSE
     )
     
-    df_pheno <- data.frame(
-      Panel_Raw = c("Pheno Scanner (hg19/hg38)", "", "", "", ""),
-      Label = c("EUR", "AFR", "SAS", "EAS", "AMR"),
-      Sample_Name = c("European", "African", "South Asian", "East Asian", "American"),
-      Count_Str = c("503", "661", "489", "504", "347")
-    )
-    
-    df_hapmap <- data.frame(
-      Panel_Raw = c("HapMap (hg16)", rep("", 10)),
-      Label = c("ASW", "CEU", "CHB", "CHD", "GIH", "JPT", "LWK", "MEX", "MKK", "TSI", "YRI"),
-      Sample_Name = c("African ancestry in SW USA", "Utah residents", "Han Chinese", "Chinese in Denver", "Gujarati Indians", "Japanese in Tokyo", "Luhya in Kenya", "Mexican ancestry in LA", "Maasai in Kenya", "Toscans in Italy", "Yoruba in Nigeria"),
-      Count_Str = c("90", "180", "90", "100", "100", "91", "100", "90", "180", "100", "180")
-    )
-    
-    df_raiss <- data.frame(
-      Panel_Raw = c("RAISS (1000G hg38)", "", "", "", ""),
-      Label = c("EUR", "AFR", "SAS", "EAS", "AMR"),
-      Sample_Name = c("European", "African", "South Asian", "East Asian", "Admixed American"),
-      Count_Str = c("632", "893", "601", "585", "490")
-    )
-    
-    df_ukbb <- data.frame(
-      Panel_Raw = c("UKBB (hg19)", "", "", "", "", ""),
-      Label = c("EUR", "AFR", "CSA", "EAS", "AMR", "MID"),
-      Sample_Name = c("European", "African", "South Asian", "East Asian", "Admixed American", "Middle Eastern"),
-      Count_Str = c("362,446", "6,255", "8,284", "2,700", "987", "1,567")
-    )
-    
-    df_lasi <- data.frame(
-      Panel_Raw = c("LASI-DAD"),
-      Label = c("IND"),
-      Sample_Name = c("Indian"),
-      Count_Str = c("2,680")
-    )
-    
-    df_hgdp <- data.frame(
-      Panel_Raw = c("HGDP", "", "", "", "", "", ""),
-      Label = c("EUR", "AFR", "CSA", "EAS", "AMR", "MID", "OCN"),
-      Sample_Name = c("European", "African", "Central South Asian", "East Asian", "Admixed American", "Middle Eastern", "Oceanian"),
-      Count_Str = c("155", "104", "197", "223", "61", "161", "28")
-    )
-    
-    # Combine
-    df <- rbind(df_topld, df_pheno, df_hapmap, df_raiss, df_ukbb, df_lasi, df_hgdp)
-    
-    # Fill down Panel names for grouping
+    # Fill down panel names for grouping while keeping Panel_Raw blank rows for display.
     filled_panel <- as.character(df$Panel_Raw)
-    for(i in 2:length(filled_panel)) {
-      if(filled_panel[i] == "" || is.na(filled_panel[i])) {
-        filled_panel[i] <- filled_panel[i-1]
+    for (i in seq_along(filled_panel)) {
+      if (i > 1 && (filled_panel[i] == "" || is.na(filled_panel[i]))) {
+        filled_panel[i] <- filled_panel[i - 1]
       }
     }
     df$Panel <- filled_panel
-    
-    # Clean Numbers
     df$Count <- as.numeric(gsub(",", "", df$Count_Str))
-    
+    df$Variants <- as.numeric(gsub(",", "", df$Variants_Str))
     df
   })
   
@@ -1746,8 +2247,8 @@ server <- function(input, output, session) {
   output$ref_pop_table <- renderTable({
     df <- ref_data_raw()
     # Format for display (keep original columns but rename nicely)
-    disp_df <- df[, c("Panel_Raw", "Label", "Sample_Name", "Count_Str")]
-    names(disp_df) <- c("Reference Panel", "Label", "Population Sample", "Number of Samples")
+    disp_df <- df[, c("Panel_Raw", "Label", "Sample_Name", "Count_Str", "Variants_Str")]
+    names(disp_df) <- c("Reference Panel", "Label", "Population Sample", "Number of Samples", "Number of Variants")
     disp_df
   }, striped = TRUE, hover = TRUE, bordered = TRUE, width = "100%")
   
@@ -1788,6 +2289,34 @@ server <- function(input, output, session) {
         yaxis = list(title = "Number of Populations"),
         font = list(family = "Inter"),
         margin = list(b = 60)
+      )
+  })
+  
+  # Chart 3: Unique rsIDs / variants per reference-panel population
+  output$doc_variants_plot <- renderPlotly({
+    df <- ref_data_raw()
+    df$Panel_Label <- paste(df$Panel, df$Label, sep = " / ")
+    df <- df[order(df$Variants, decreasing = TRUE), ]
+    df$Panel_Label <- factor(df$Panel_Label, levels = df$Panel_Label)
+    
+    plot_ly(
+      df,
+      x = ~Panel_Label,
+      y = ~Variants,
+      type = 'bar',
+      text = ~Variants_Str,
+      hovertemplate = paste(
+        '<b>%{x}</b><br>',
+        'Unique rsIDs / variants: %{text}<extra></extra>'
+      ),
+      marker = list(color = '#ffb703', line = list(color = '#2c3e50', width = 1))
+    ) %>%
+      layout(
+        title = "Unique rsIDs / Variants by Reference Panel",
+        xaxis = list(title = "", tickangle = -45),
+        yaxis = list(title = "Number of Variants", type = "log"),
+        font = list(family = "Inter"),
+        margin = list(b = 150)
       )
   })
 }
