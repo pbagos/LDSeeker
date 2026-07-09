@@ -160,6 +160,141 @@ def _merge_tmp_files(output_file: str, tmp_files: list[str]):
 
 
 # -------------------------------------------------------------------
+# SNP -> Gene annotation (--snp_to_gene YES)
+# -------------------------------------------------------------------
+# The gene reference lives in ``snps_genes_ref/`` in the working directory,
+# split per chromosome as ``snp_gene_map_chr{N}.parquet`` and holding the
+# columns ``Chromosome``, ``SNP`` and ``Gene``. Files are read through the
+# Arrow library (pyarrow), projecting only ``SNP``/``Gene`` so the memory
+# footprint stays small, and collapsed to a single Gene value per SNP
+# (multiple overlapping genes are joined with ";"). The resulting map is
+# left-joined onto every rsID/SNP identifier column of the final results
+# just before it is streamed to disk, so no LD row is ever duplicated.
+
+# Any of: rsid, snp, rsID1/rsid1/rsID_1, rsID2, rsID_A/rsID_B, SNP1/SNP2,
+# SNP_A/SNP_B ... (case-insensitive). Position/allele columns such as POS1,
+# REF1, MAF1, Uniq_ID_1 do NOT start with rsid/snp and are therefore ignored.
+_ID_COL_RE = re.compile(r"^(rsid|snp)(?:[_\-]?([0-9]+|[abAB]))?$", re.IGNORECASE)
+
+
+def _gene_col_for(id_col: str) -> str:
+    """Name of the Gene column paired with a given identifier column.
+
+    rsID1 / rsid1 / rsID_1 -> Gene1 ; rsID2 -> Gene2 ;
+    rsID_A / SNP_A -> Gene_A ; bare SNP / rsid -> Gene.
+    """
+    m = _ID_COL_RE.match(id_col)
+    suffix = m.group(2) if (m and m.group(2)) else ""
+    if suffix == "":
+        return "Gene"
+    if suffix.isdigit():
+        return f"Gene{suffix}"
+    return f"Gene_{suffix.upper()}"
+
+
+def build_snp_gene_map(chroms, snps_genes_dir: str = "snps_genes_ref"):
+    """Build a unique SNP -> Gene lookup for the requested chromosomes.
+
+    Reads ``snps_genes_dir/snp_gene_map_chr{N}.parquet`` with pyarrow (only the
+    ``SNP`` and ``Gene`` columns), concatenates the needed chromosomes and
+    collapses to one row per SNP, with overlapping genes joined by ";".
+    Returns a small collected ``pl.DataFrame`` (columns ``SNP``, ``Gene``) that
+    is reused for every output batch, or ``None`` if annotation cannot proceed
+    (missing folder / files / pyarrow). Returning ``None`` makes annotation a
+    graceful no-op rather than an error.
+    """
+    import glob
+
+    if not os.path.isdir(snps_genes_dir):
+        print(f"[snp_to_gene] Reference folder '{snps_genes_dir}' not found - skipping gene annotation.")
+        return None
+
+    # Prefer only the chromosome files actually needed by this run.
+    files = []
+    if chroms:
+        for c in chroms:
+            f = os.path.join(snps_genes_dir, f"snp_gene_map_chr{c}.parquet")
+            if os.path.exists(f):
+                files.append(f)
+    if not files:  # fall back to every available map file
+        files = sorted(glob.glob(os.path.join(snps_genes_dir, "snp_gene_map_chr*.parquet")))
+    if not files:
+        print(f"[snp_to_gene] No 'snp_gene_map_chr*.parquet' files in '{snps_genes_dir}' - skipping.")
+        return None
+
+    try:
+        import pyarrow as pa
+        import pyarrow.parquet as pq
+    except ImportError:
+        print("[snp_to_gene] pyarrow (arrow library) not available - skipping gene annotation.")
+        return None
+
+    tables = []
+    for f in files:
+        try:
+            # Column projection: read only what we need for a light footprint.
+            tables.append(pq.read_table(f, columns=["SNP", "Gene"]))
+        except Exception as e:
+            print(f"[snp_to_gene] Could not read '{f}': {e}")
+    if not tables:
+        print("[snp_to_gene] No readable gene-map tables - skipping gene annotation.")
+        return None
+
+    combined = pa.concat_tables(tables)
+
+    # Hand the Arrow table to Polars, then reduce to a unique SNP key so the
+    # downstream left-join is strictly 1:1 and can never inflate LD row counts.
+    gene_map = (
+        pl.from_arrow(combined)
+        .lazy()
+        .select([pl.col("SNP").cast(pl.Utf8), pl.col("Gene").cast(pl.Utf8)])
+        .drop_nulls(subset=["SNP"])
+        .group_by("SNP")
+        .agg(pl.col("Gene").drop_nulls().unique(maintain_order=True).alias("Gene"))
+        .with_columns(pl.col("Gene").list.join(";"))
+        .collect()
+    )
+    print(f"[snp_to_gene] Loaded {gene_map.height} unique SNP->Gene entries from {len(files)} file(s).")
+    return gene_map
+
+
+def annotate_genes_lazy(lazy_frame: pl.LazyFrame, gene_map) -> pl.LazyFrame:
+    """Left-join a ``Gene`` column beside every rsID/SNP identifier column.
+
+    Detects identifier columns via ``_ID_COL_RE`` on the (lazy) schema and, for
+    each, joins the pre-built ``gene_map`` on that column, placing the resulting
+    gene column immediately to the right of its source. Unknown SNPs get a null
+    gene. The whole operation stays lazy so it fuses into the existing
+    ``sink_csv`` streaming plan. If ``gene_map`` is ``None`` or no identifier
+    column is present, the frame is returned unchanged.
+    """
+    if gene_map is None:
+        return lazy_frame
+
+    schema_names = lazy_frame.collect_schema().names()
+    id_cols = [c for c in schema_names if _ID_COL_RE.match(c)]
+    if not id_cols:
+        return lazy_frame
+
+    gene_map_lazy = gene_map.lazy() if isinstance(gene_map, pl.DataFrame) else gene_map
+
+    used = set(schema_names)
+    final_order = list(schema_names)
+    lf = lazy_frame
+    for id_col in id_cols:
+        gcol = _gene_col_for(id_col)
+        if gcol in used:                      # avoid clobbering an existing / duplicate name
+            gcol = f"Gene_{id_col}"
+        used.add(gcol)
+        gm = gene_map_lazy.rename({"SNP": id_col, "Gene": gcol})
+        # Cast the key to Utf8 on both sides so the join never fails on dtype.
+        lf = lf.with_columns(pl.col(id_col).cast(pl.Utf8)).join(gm, on=id_col, how="left")
+        idx = final_order.index(id_col)
+        final_order.insert(idx + 1, gcol)     # gene column sits right after its SNP
+    return lf.select(final_order)
+
+
+# -------------------------------------------------------------------
 # High-Performance Numba Graph Pruning (Zero-Allocation Streaming)
 # -------------------------------------------------------------------
 
@@ -313,8 +448,8 @@ def TOP_LD_info_pairwise(rs_series, chrom, population, maf_threshold, R2_thresho
 
     snp_series = _get_snp_series(rs_series, imp_snp_list)
 
-    maf_path = f"ref/TOP_LD/{population}/SNV/{population}_chr{chrom}_no_filter_0.2_1000000_info_annotation.parquet"
-    ld_path = f"ref/TOP_LD/{population}/SNV/{population}_chr{chrom}_no_filter_0.2_1000000_LD.parquet"
+    maf_path = f"D:/ref/TOP_LD/{population}/SNV/{population}_chr{chrom}_no_filter_0.2_1000000_info_annotation.parquet"
+    ld_path = f"D:/ref/TOP_LD/{population}/SNV/{population}_chr{chrom}_no_filter_0.2_1000000_LD.parquet"
 
     if ld_prune:
         maf_lazy = pl.scan_parquet(maf_path).select(["Uniq_ID", "rsID"])
@@ -376,8 +511,8 @@ def Hap_Map_LD_info_dask_pairwise(rs_series, chrom, population, maf_threshold, R
     print(f"Building query plan: Hap Map files ({population}) chr{chrom}...")
     snp_series = _get_snp_series(rs_series, imp_snp_list)
 
-    maf_file = f'ref/Hap_Map/allele_freqs_chr{chrom}_{population}_phase3.2_nr.b36_fwd.parquet'
-    ld_file = f'ref/Hap_Map/ld_chr{chrom}_{population}.parquet'
+    maf_file = f'D:/ref/Hap_Map/allele_freqs_chr{chrom}_{population}_phase3.2_nr.b36_fwd.parquet'
+    ld_file = f'D:/ref/Hap_Map/ld_chr{chrom}_{population}.parquet'
 
     ld_raw = pl.scan_parquet(ld_file)
     cols = ld_raw.collect_schema().names()
@@ -448,8 +583,8 @@ def pheno_Scanner_LD_info_dask_pairwise(rs_series, chrom, population, maf_thresh
     print(f"Building query plan: Pheno Scanner files chr{chrom}...")
     snp_series = _get_snp_series(rs_series, imp_snp_list)
 
-    maf_file = "ref/Pheno_Scanner/1000G.parquet"
-    ld_file = f"ref/Pheno_Scanner/1000G_{population}/1000G_{population}_chr{chrom}.parquet"
+    maf_file = "D:/ref/Pheno_Scanner/1000G.parquet"
+    ld_file = f"D:/ref/Pheno_Scanner/1000G_{population}/1000G_{population}_chr{chrom}.parquet"
     pop_map = {"EUR": "eur", "EAS": "eas", "AFR": "afr", "AMR": "amr", "SAS": "sas"}
     maf_pop = pop_map.get(population)
 
@@ -519,8 +654,8 @@ def hg38_1kg_LD_info_pairwise(rs_series, chrom, population, maf_threshold, R2_th
     print(f"Building query plan: 1000 Genomes Project (hg38) files ({population}) chr{chrom}...")
     snp_series = _get_snp_series(rs_series, imp_snp_list)
 
-    maf_file = f'ref/1000G_hg38/1000G_{population}_0_01.parquet'
-    ld_file = f'ref/1000G_hg38/{population}/chr{chrom}_merged.parquet'
+    maf_file = f'D:/ref/1000G_hg38/1000G_{population}_0_01.parquet'
+    ld_file = f'D:/ref/1000G_hg38/{population}/chr{chrom}_merged.parquet'
 
     ld_lazy = pl.scan_parquet(ld_file)
 
@@ -614,7 +749,7 @@ def _generic_vcor_pairwise(rs_series, R2_threshold, maf_threshold, ld_file, imp_
 def hg38_1kg_LD_info_high_coverage_pairwise(rs_series, R2_threshold, population, maf_threshold, chrom, imp_snp_list,
                                             ld_prune=False, pairwise: bool = True):
     print(f"Building query plan: 1KGP high-cov files ({population}) chr{chrom}...")
-    ld_file = f'ref/1KGP_high_coverage/LD_{population}_r_unphased/{population}_chr{chrom}_r_unphased.vcor.parquet'
+    ld_file = f'D:/ref/1KGP_high_coverage/LD_{population}_r_unphased/{population}_chr{chrom}_r_unphased.vcor.parquet'
     return _generic_vcor_pairwise(rs_series, R2_threshold, maf_threshold, ld_file, imp_snp_list, ld_prune,
                                   is_phased=False, pairwise=pairwise)
 
@@ -641,7 +776,7 @@ def HGDP_LD_info_pairwise(rs_series, R2_threshold, population, maf_threshold, ch
     hgdp_pop = pop_map.get(str(population).upper(), population)
 
     print(f"Building query plan: HGDP files ({hgdp_pop}) chr{chrom}...")
-    ld_file = f'ref/HGDP/LD_{hgdp_pop}_r_phased/{hgdp_pop}_chr{chrom}_r_phased.vcor.parquet'
+    ld_file = f'D:/ref/HGDP/LD_{hgdp_pop}_r_phased/{hgdp_pop}_chr{chrom}_r_phased.vcor.parquet'
     return _generic_vcor_pairwise(rs_series, R2_threshold, maf_threshold, ld_file, imp_snp_list, ld_prune,
                                   is_phased=True, pairwise=pairwise)
 
@@ -654,7 +789,7 @@ def UKBB_LD_info_pairwise(rs_series, R2_threshold, population, maf_threshold, ch
                           pairwise: bool = True):
     print(f"Building query plan: UK Biobank ({population}) chr{chrom}...")
     snp_series = _get_snp_series(rs_series, imp_snp_list)
-    ld_file = f'ref/UKBB/{population}/chr_{chrom}_ld.parquet'
+    ld_file = f'D:/ref/UKBB/{population}/chr_{chrom}_ld.parquet'
     ld_lazy = pl.scan_parquet(ld_file)
 
     if ld_prune:
@@ -704,7 +839,7 @@ def LASI_DAD_LD_info_pairwise(rs_series, R2_threshold, population, maf_threshold
     # LASI-DAD is a single-population (South Asian) panel, so `population` is
     # accepted for interface compatibility but not used to build the path.
     # >>> Adjust this path/pattern to match your actual layout. <
-    ld_file = f'ref/LASI_DAD/chr{chrom}_ld_with_rsids.parquet'
+    ld_file = f'D:/ref/LASI_DAD/chr{chrom}_ld_with_rsids.parquet'
 
     ld_lazy = pl.scan_parquet(ld_file)
 
@@ -918,7 +1053,8 @@ def _get_study_info_chunked(file_path: str, is_pairwise: bool = False,
 
 def process_data(file_path, r2threshold, population, maf_input, ref_file, imp_snp_list,
                  sig_keep: str | None = None, sig_metric: str = "P", sig_threshold: float = 5e-8,
-                 z_col: str = "Z", beta_col: str = "BETA", se_col: str = "SE", p_col: str = "P"):
+                 z_col: str = "Z", beta_col: str = "BETA", se_col: str = "SE", p_col: str = "P",
+                 snp_to_gene: bool = False, snps_genes_dir: str = "snps_genes_ref"):
     # Determine execution strategy based on file size threshold (500MB)
     file_size_mb = os.path.getsize(file_path) / (1024 * 1024)
     is_large_file = file_size_mb > 500
@@ -928,6 +1064,9 @@ def process_data(file_path, r2threshold, population, maf_input, ref_file, imp_sn
             file_path, is_pairwise=False,
             sig_keep=sig_keep, sig_metric=sig_metric, sig_threshold=sig_threshold,
             z_col=z_col, beta_col=beta_col, se_col=se_col, p_col=p_col)
+
+        # Build the SNP->Gene lookup once (reused for every output batch).
+        gene_map = build_snp_gene_map(chroms, snps_genes_dir) if snp_to_gene else None
 
         processors = {
             "1000G_hg38": hg38_1kg_process, "1000G_hg38_high_cov": hg38_1kg_process_high_coverage,
@@ -954,14 +1093,16 @@ def process_data(file_path, r2threshold, population, maf_input, ref_file, imp_sn
 
             if lazy_results_list:
                 batch_lazy = pl.concat(lazy_results_list, how="vertical_relaxed")
+                # Attach Gene column(s) beside each rsID/SNP column before writing.
+                out_lazy = annotate_genes_lazy(batch_lazy, gene_map)
                 if is_large_file and batch_size < len(chroms):
                     tmp_file = f"LD_info_tmp_batch_{i}.txt"
                     print(f"Streaming batch {i // batch_size + 1} (chroms: {batch_chroms}) to disk...")
-                    batch_lazy.sink_csv(tmp_file, separator="\t")
+                    out_lazy.sink_csv(tmp_file, separator="\t")
                     tmp_files.append(tmp_file)
                 else:
                     print("Streaming highly parallelized query across all chromosomes...")
-                    batch_lazy.sink_csv("LD_info_chr_all.txt", separator="\t")
+                    out_lazy.sink_csv("LD_info_chr_all.txt", separator="\t")
                     print("Check 'LD_info_chr_all.txt' for results")
                     return
 
@@ -987,7 +1128,8 @@ def process_data_pairwise(
         ld_prune_metric: str = "P",
         ld_prune_out_prefix: str = "LD_pruned",
         sig_keep: str | None = None, sig_metric: str = "P", sig_threshold: float = 5e-8,
-        z_col: str = "Z", beta_col: str = "BETA", se_col: str = "SE", p_col: str = "P"
+        z_col: str = "Z", beta_col: str = "BETA", se_col: str = "SE", p_col: str = "P",
+        snp_to_gene: bool = False, snps_genes_dir: str = "snps_genes_ref"
 ):
     # Determine execution strategy based on file size threshold (500MB)
     file_size_mb = os.path.getsize(file_path) / (1024 * 1024)
@@ -998,6 +1140,9 @@ def process_data_pairwise(
             file_path, is_pairwise=True,
             sig_keep=sig_keep, sig_metric=sig_metric, sig_threshold=sig_threshold,
             z_col=z_col, beta_col=beta_col, se_col=se_col, p_col=p_col)
+
+        # Build the SNP->Gene lookup once (reused for every output batch).
+        gene_map = build_snp_gene_map(chroms, snps_genes_dir) if snp_to_gene else None
 
         # We still define the lazy frame to execute sinks/filters downstream in an out-of-core manner.
         study_lazy = pl.scan_csv(file_path, separator="\t")
@@ -1047,14 +1192,16 @@ def process_data_pairwise(
 
                 if lazy_results_list:
                     batch_lazy = pl.concat(lazy_results_list, how="vertical_relaxed")
+                    # Attach Gene column(s) beside each rsID/SNP column before writing.
+                    out_lazy = annotate_genes_lazy(batch_lazy, gene_map)
                     if is_large_file and batch_size < len(chroms):
                         tmp_file = f"LD_info_pairwise_tmp_batch_{i}.txt"
                         print(f"Streaming batch {i // batch_size + 1} (chroms: {batch_chroms}) to disk...")
-                        batch_lazy.sink_csv(tmp_file, separator="\t")
+                        out_lazy.sink_csv(tmp_file, separator="\t")
                         tmp_files.append(tmp_file)
                     else:
                         print("Streaming highly parallelized pairwise query across all chromosomes...")
-                        batch_lazy.sink_csv("LD_info_chr_all_pairwise.txt", separator="\t")
+                        out_lazy.sink_csv("LD_info_chr_all_pairwise.txt", separator="\t")
                         print("Check 'LD_info_chr_all_pairwise.txt' for results")
                         return pl.DataFrame(), None
 
@@ -1113,14 +1260,16 @@ def process_data_pairwise(
 
                 if kept_lazy_list:
                     batch_lazy = pl.concat(kept_lazy_list, how="vertical_relaxed")
+                    # Attach Gene column(s) beside the kept-GWAS SNP column before writing.
+                    out_lazy = annotate_genes_lazy(batch_lazy, gene_map)
                     if is_large_file and batch_size < len(chroms):
                         tmp_file = f"{ld_prune_out_prefix}_tmp_batch_{i}.txt"
                         print(f"Streaming pruning batch {i // batch_size + 1} (chroms: {batch_chroms}) to disk...")
-                        batch_lazy.sink_csv(tmp_file, separator="\t")
+                        out_lazy.sink_csv(tmp_file, separator="\t")
                         tmp_files.append(tmp_file)
                     else:
                         print("Streaming highly parallelized LD pruning across all chromosomes...")
-                        batch_lazy.sink_csv(out_name, separator="\t")
+                        out_lazy.sink_csv(out_name, separator="\t")
                         print(f"LD-pruned GWAS successfully saved to '{out_name}'.")
                         return pl.DataFrame(), pl.scan_csv(out_name, separator="\t")
 

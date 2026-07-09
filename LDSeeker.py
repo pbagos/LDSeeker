@@ -58,6 +58,27 @@ def main():
         help='A filename to define SNPs to impute (each SNP has a new line, no header)'
     )
 
+    # --- SNP -> Gene annotation ---
+    parser.add_argument(
+        '--snp_to_gene',
+        type=str,
+        required=False,
+        default='NO',
+        help='Annotate every rsID/SNP identifier column of the final results with '
+             'its Gene (YES, NO). Genes are read from per-chromosome parquet files '
+             '"snp_gene_map_chr{N}.parquet" (columns: Chromosome, SNP, Gene) via the '
+             'Arrow library. Applies to standard, pairwise and LD-pruning outputs. '
+             'Default is "NO".'
+    )
+    parser.add_argument(
+        '--snps_genes_dir',
+        type=str,
+        required=False,
+        default='snps_genes_ref',
+        help='Directory holding the per-chromosome "snp_gene_map_chr{N}.parquet" '
+             'gene-reference files. Default "snps_genes_ref" (in the working directory).'
+    )
+
     # --- LD pruning related arguments (used only when --pairwise YES) ---
     prune_group = parser.add_argument_group(
         'LD pruning (pairwise mode only)',
@@ -219,6 +240,10 @@ def main():
     ld_prune_flag = args.ld_prune.upper()
     ld_prune = (ld_prune_flag == 'YES')
 
+    # SNP -> Gene annotation (applies to every output path)
+    snp_to_gene = (args.snp_to_gene.upper() == 'YES')
+    snps_genes_dir = args.snps_genes_dir
+
     # Significance filtering (shared by both entry points)
     sig_kwargs = dict(
         sig_keep=args.significance,
@@ -247,6 +272,8 @@ def main():
             maf_input,
             ref_file,
             imp_snp_list,
+            snp_to_gene=snp_to_gene,
+            snps_genes_dir=snps_genes_dir,
             **sig_kwargs
         )
     else:
@@ -270,6 +297,8 @@ def main():
             ld_prune_z_threshold=args.ld_prune_z_threshold,
             ld_prune_metric=args.ld_prune_metric,
             ld_prune_out_prefix=args.ld_prune_prefix,
+            snp_to_gene=snp_to_gene,
+            snps_genes_dir=snps_genes_dir,
             **sig_kwargs
         )
 
