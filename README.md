@@ -149,7 +149,7 @@ python LDSeeker.py --file-path input_gwas.txt --r2threshold 0.2 --pop EUR --maf 
 | \--r2threshold | **Yes** | \- | Minimum ![][image1] value (0.0 \- 1.0). |
 | \--pop | **Yes** | \- | Population code (e.g., EUR, AMR, AFR, EAS, SAS). |
 | \--maf | **Yes** | \- | Minor Allele Frequency threshold (e.g., 0.01). |
-| \--ref | No | 1000G\_hg38 | Reference panel (e.g., UKBB, HGDP, TOP\_LD, Hap_Map, 1000G\_hg38\_high\_cov,1000G\_hg38). |
+| \--ref | No | 1000G\_hg38 | Reference panel (e.g., UKBB, HGDP, ,LASI_DAD, TOP\_LD, Hap_Map, 1000G\_hg38\_high\_cov,1000G\_hg38). |
 | \--pairwise | No | NO | Calculate pairwise LD between input SNPs (YES or NO). |
 | \--imp\_list | No | \- | Path to a file containing a specific list of SNPs to impute/filter (no header). |
 | \--ld-prune | No | NO | Apply LD pruning? (Requires \--pairwise YES). |
