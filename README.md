@@ -8,8 +8,20 @@
 
 A web-based version is available at [https://compgen.dib.uth.gr/LDSeeker/](https://compgen.dib.uth.gr/LDSeeker/)
 
-## Download Reference panels 
-You can download all the LD reference panels in .parquet format from [here](http://195.251.108.185/ref/).
+## Download Reference panels and resources
+ 
+| Resource | Web address |
+| :--- | :--- |
+| LDSeeker GitHub repository | https://github.com/pbagos/LDSeeker/ |
+| LDSeeker web tool | https://compgen.dib.uth.gr/LDSeeker/ |
+| UKBB LD reference panel | https://zenodo.org/records/18847278 |
+| 1000 Genomes Project – high coverage LD reference panel | https://zenodo.org/records/18849097 |
+| 1000 Genomes Project LD reference panel | https://zenodo.org/records/18861527 |
+| TOP-LD LD reference panel | http://195.251.108.185/ref_panels/TOP_LD |
+| HapMap LD reference panel | https://zenodo.org/records/20213914 |
+| LASI-DAD LD reference panel | https://zenodo.org/records/20256884 |
+| HGDP LD reference panel | http://195.251.108.185/HGDP/ |
+| SNP to Gene mapping reference | https://zenodo.org/records/20161132 |
 
 ## **Key Capabilities**
 
