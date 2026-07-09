@@ -77,47 +77,52 @@ The tool expects Parquet files for the following panels:
 
 The tool expects Parquet files for the following reference panels and populations:
 
-| Reference Panel | Label | Population Sample | Number of Samples |
-| :--- | :--- | :--- | :--- |
-| **TOP-LD (hg38)** | EUR | European | 13,160 |
-| | AFR | African | 1,335 |
-| | SAS | South Asian | 239 |
-| | EAS | East Asian | 844 |
-| **PhenoScanner (Phase 3, hg19 & hg38)** | EUR | European | 503 |
-| | AFR | African | 661 |
-| | SAS | South Asian | 489 |
-| | EAS | East Asian | 504 |
-| | AMR | American | 347 |
-| **HapMap (hg16)** | ASW | African ancestry in Southwest USA | 90 |
-| | CEU | Utah residents with N/W European ancestry | 180 |
-| | CHB | Han Chinese in Beijing, China | 90 |
-| | CHD | Chinese in Metropolitan Denver, Colorado | 100 |
-| | GIH | Gujarati Indians in Houston, Texas | 100 |
-| | JPT | Japanese in Tokyo, Japan | 91 |
-| | LWK | Luhya in Webuye, Kenya | 100 |
-| | MEX | Mexican ancestry in Los Angeles, California | 90 |
-| | MKK | Maasai in Kinyawa, Kenya | 180 |
-| | TSI | Toscans in Italy | 100 |
-| | YRI | Yoruba in Ibadan, Nigeria | 180 |
-| **RAISS (1000G Phase 3, hg38)** | EUR | European | 632 |
-| | AFR | African | 893 |
-| | SAS | South Asian | 601 |
-| | EAS | East Asian | 585 |
-| | AMR | Admixed American | 490 |
-| **UKBB (hg19)** | EUR | European | 362,446 |
-| | AFR | African | 6,255 |
-| | CSA | Central and South Asian | 8,284 |
-| | EAS | East Asian | 2,700 |
-| | AMR | Admixed American | 987 |
-| | MID | Middle Eastern | 1,567 |
-| **LASI-DAD** | IND | Indian | 2,680 |
-| **HGDP** | EUR | European | 155 |
-| | AFR | African | 104 |
-| | CSA | Central South Asian | 197 |
-| | EAS | East Asian | 223 |
-| | AMR | Admixed American | 61 |
-| | MID | Middle Eastern | 161 |
-| | OCN | Oceanian | 28 |
+| Reference Panel | Label | Population Sample | Number of Samples | Number of Variants |
+| :--- | :--- | :--- | ---: | ---: |
+| **TOP-LD (hg38)** | EUR | European | 13,160 | 69,524,944 |
+| | AFR | African | 1,335 | 60,392,677 |
+| | SAS | South Asian | 239 | 22,309,649 |
+| | EAS | East Asian | 844 | 35,538,656 |
+| **PhenoScanner (Phase 3, hg19 & hg38)** | EUR | European | 503 | 11,159,862 |
+| | AFR | African | 661 | 11,159,862 |
+| | SAS | South Asian | 489 | 11,159,862 |
+| | EAS | East Asian | 504 | 11,159,862 |
+| | AMR | American | 347 | 11,159,862 |
+| **HapMap (hg16)** | ASW | African ancestry in Southwest USA | 90 | 1,561,113 |
+| | CEU | Utah residents with Northern and Western European ancestry from the CEPH collection | 180 | 1,412,161 |
+| | CHB | Han Chinese in Beijing, China | 90 | 1,328,283 |
+| | CHD | Chinese in Metropolitan Denver, Colorado | 100 | 1,305,880 |
+| | GIH | Gujarati Indians in Houston, Texas | 100 | 1,407,540 |
+| | JPT | Japanese in Tokyo, Japan | 91 | 1,296,969 |
+| | LWK | Luhya in Webuye, Kenya | 100 | 1,529,438 |
+| | MEX | Mexican ancestry in Los Angeles, California | 90 | 1,409,947 |
+| | MKK | Maasai in Kinyawa, Kenya | 180 | 1,419,626 |
+| | TSI | Toscans in Italy | 100 | 1,419,920 |
+| | YRI | Yoruba in Ibadan, Nigeria | 180 | 1,501,085 |
+| **1000 Genomes Project Phase 3 (hg38)** | EUR | European | 632 | 8,193,280 |
+| | AFR | African | 893 | 13,876,891 |
+| | SAS | South Asian | 601 | 8,579,150 |
+| | EAS | East Asian | 585 | 7,245,426 |
+| | AMR | Admixed American | 490 | 9,347,814 |
+| **1000 Genomes Project Phase 3 (hg38), high coverage** | EUR | European | 632 | 9,263,406 |
+| | AFR | African | 893 | 15,952,015 |
+| | SAS | South Asian | 601 | 9,439,730 |
+| | EAS | East Asian | 585 | 7,989,898 |
+| | AMR | Admixed American | 490 | 10,106,451 |
+| **UKBB (hg19)** | EUR | European | 362,446 | 1,431,634 |
+| | AFR | African | 6,255 | 1,259,175 |
+| | CSA | Central and South Asian | 8,284 | 1,379,991 |
+| | EAS | East Asian | 2,700 | 1,146,910 |
+| | AMR | Admixed American | 987 | 1,286,943 |
+| | MID | Middle Eastern | 1,567 | 1,307,269 |
+| **LASI-DAD (hg38)** | IND | Indian | 2,680 | 119,948,583 |
+| **HGDP** | EUR | European | 155 | 10,144,721 |
+| | AFR | African | 104 | 18,062,644 |
+| | CSA | Central South Asian | 197 | 11,281,764 |
+| | EAS | East Asian | 223 | 9,631,805 |
+| | AMR | Admixed American | 61 | 7,592,946 |
+| | MID | Middle Eastern | 161 | 11,731,317 |
+| | OCN | Oceanian | 28 | 8,147,809 |
 
 
 ## **Usage**
